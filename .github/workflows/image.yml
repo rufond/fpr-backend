@@ -2,10 +2,8 @@ name: Container image
 
 on:
   push:
-    branches:
-      - main
     tags:
-      - "v*"
+      - "v*.*.*"
 
 permissions:
   contents: read
@@ -23,7 +21,7 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Test before publishing image
+      - name: Test
         run: go test ./...
 
       - name: Set up Docker Buildx
@@ -42,8 +40,6 @@ jobs:
         with:
           images: ghcr.io/rufond/fpr-backend
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
             type=ref,event=tag
 
       - name: Build and push
