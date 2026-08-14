@@ -3,21 +3,33 @@ package fund
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
 )
 
 var ErrStateUnavailable = errors.New("fund state unavailable")
 
-var stateFundInfo = StateFundInfo{
-	Name:              "Закрытый паевой инвестиционный фонд рыночных финансовых инструментов «Фонд первичных размещений»",
-	ShortName:         "Фонд первичных размещений",
-	RulesNumber:       "3964",
-	UnitISIN:          "RU000A101NK4",
-	ManagementCompany: "ООО «Управляющая компания «Восток-Запад»»",
+func (s *Service) State() (*StateResult, error) {
+	state, err := s.currentFundState()
+	if err != nil {
+		return nil, err
+	}
+
+	return buildStateResult(state), nil
 }
 
-func (s *Service) State() (*StateResult, error) {
+func (s *Service) History(from *time.Time) (*HistoryResult, error) {
+	state, err := s.currentFundState()
+	if err != nil {
+		return nil, err
+	}
+
+	return buildHistoryResult(state, from), nil
+}
+
+func (s *Service) currentFundState() (*appstate.FundState, error) {
 	if s.state == nil {
 		return nil, fmt.Errorf("application state manager is not configured")
 	}
@@ -27,12 +39,11 @@ func (s *Service) State() (*StateResult, error) {
 		return nil, ErrStateUnavailable
 	}
 
-	return buildStateResult(current.Fund), nil
+	return current.Fund, nil
 }
 
 func buildStateResult(state *appstate.FundState) *StateResult {
 	result := &StateResult{
-		Fund: stateFundInfo,
 		OfficialSnapshot: StateOfficialSnapshot{
 			AsOfDate:               state.Snapshot.AsOfDate.Format("2006-01-02"),
 			ObservedAt:             state.Snapshot.ObservedAt,
@@ -41,7 +52,6 @@ func buildStateResult(state *appstate.FundState) *StateResult {
 			Assets:                 make([]StateAsset, 0, len(state.Snapshot.Assets)),
 			Categories:             make([]StateCategory, 0, len(state.Snapshot.Categories)),
 		},
-		DailyValues: make([]StateDailyValue, 0, len(state.DailyValues)),
 	}
 
 	for _, item := range state.Snapshot.Assets {
@@ -56,7 +66,22 @@ func buildStateResult(state *appstate.FundState) *StateResult {
 		})
 	}
 
-	for _, item := range state.DailyValues {
+	return result
+}
+
+func buildHistoryResult(state *appstate.FundState, from *time.Time) *HistoryResult {
+	start := 0
+	if from != nil {
+		start = sort.Search(len(state.DailyValues), func(index int) bool {
+			return !state.DailyValues[index].AsOfDate.Before(*from)
+		})
+	}
+
+	result := &HistoryResult{
+		DailyValues: make([]StateDailyValue, 0, len(state.DailyValues)-start),
+	}
+
+	for _, item := range state.DailyValues[start:] {
 		result.DailyValues = append(result.DailyValues, StateDailyValue{
 			AsOfDate:               item.AsOfDate.Format("2006-01-02"),
 			CalculatedUnitValueUSD: item.CalculatedUnitValueUSD,

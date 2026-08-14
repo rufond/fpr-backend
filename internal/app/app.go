@@ -63,6 +63,11 @@ func (a *App) Routes() []routes.Route {
 			Handler: a.fund.Handler.State,
 		},
 		{
+			Method:  http.MethodPost,
+			Path:    "/api/v1/fund/history",
+			Handler: a.fund.Handler.History,
+		},
+		{
 			Method:  http.MethodGet,
 			Path:    "/healthz",
 			Handler: health,

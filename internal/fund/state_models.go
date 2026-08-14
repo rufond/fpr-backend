@@ -3,17 +3,11 @@ package fund
 import "time"
 
 type StateResult struct {
-	Fund             StateFundInfo         `json:"fund"`
 	OfficialSnapshot StateOfficialSnapshot `json:"official_snapshot"`
-	DailyValues      []StateDailyValue     `json:"daily_values"`
 }
 
-type StateFundInfo struct {
-	Name              string `json:"name"`
-	ShortName         string `json:"short_name"`
-	RulesNumber       string `json:"rules_number"`
-	UnitISIN          string `json:"unit_isin"`
-	ManagementCompany string `json:"management_company"`
+type HistoryResult struct {
+	DailyValues []StateDailyValue `json:"daily_values"`
 }
 
 type StateOfficialSnapshot struct {
