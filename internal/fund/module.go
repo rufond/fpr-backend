@@ -7,6 +7,7 @@ import (
 )
 
 type Module struct {
+	Handler    *Handler
 	Repository *Repository
 	Service    *Service
 }
@@ -14,8 +15,10 @@ type Module struct {
 func NewModule(db *pgxpool.Pool, source ManagementCompanySource, state *appstate.Manager) *Module {
 	repository := NewRepository(db)
 	service := NewService(repository, source, state)
+	handler := NewHandler(service)
 
 	return &Module{
+		Handler:    handler,
 		Repository: repository,
 		Service:    service,
 	}
