@@ -5,22 +5,48 @@ import (
 	"net/http"
 
 	"github.com/rufond/fpr-backend/internal/deps"
+	"github.com/rufond/fpr-backend/internal/fund"
 	"github.com/rufond/fpr-backend/internal/routes"
+	"github.com/rufond/fpr-backend/internal/scheduler"
+	"github.com/rufond/fpr-backend/internal/schedulerjobs"
 )
 
 type App struct {
-	deps *deps.Deps
+	deps      *deps.Deps
+	fund      *fund.Module
+	scheduler *scheduler.Module
 }
 
 func New(d *deps.Deps) *App {
-	return &App{deps: d}
+	fundModule := fund.NewModule(d.DB, d.ManagementCompany)
+	schedulerModule := scheduler.NewModule(d.DB, nil)
+
+	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobManagementCompanySync,
+		"Management company sync",
+		"0 * * * *",
+		schedulerjobs.ManagementCompanySync(fundModule.Service),
+	)
+
+	return &App{
+		deps:      d,
+		fund:      fundModule,
+		scheduler: schedulerModule,
+	}
 }
 
-func (a *App) Start(_ context.Context) error {
+func (a *App) Start(ctx context.Context) error {
+	if err := a.fund.Start(ctx); err != nil {
+		return err
+	}
+
+	a.scheduler.Manager.Start(ctx)
+
 	return nil
 }
 
 func (a *App) Stop() {
+	a.scheduler.Manager.Stop()
 }
 
 func (a *App) HTTPRoutes() []routes.HTTPRoute {
