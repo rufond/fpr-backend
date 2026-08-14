@@ -6,6 +6,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/rufond/fpr-backend/internal/fund"
+	"github.com/rufond/fpr-backend/internal/realtime"
 	"github.com/rufond/fpr-backend/internal/scheduler"
 )
 
@@ -15,7 +16,11 @@ type managementCompanySyncService interface {
 	SyncManagementCompany(ctx context.Context) (*fund.SyncResult, error)
 }
 
-func ManagementCompanySync(service managementCompanySyncService) scheduler.JobFunc {
+func ManagementCompanySync(service managementCompanySyncService, publisher realtime.Publisher) scheduler.JobFunc {
+	if publisher == nil {
+		publisher = realtime.DiscardPublisher{}
+	}
+
 	return func(ctx context.Context, logger zerolog.Logger) (*scheduler.JobResult, error) {
 		result, err := service.SyncManagementCompany(ctx)
 		if err != nil {
@@ -31,6 +36,8 @@ func ManagementCompanySync(service managementCompanySyncService) scheduler.JobFu
 				Str("source_nav_usd", conflict.SourceNAVUSD).
 				Msg("management company historical value differs from fixed history")
 		}
+
+		publishManagementCompanyChanges(publisher, result)
 
 		summary := map[string]any{
 			"source_hash":       result.SourceHash,
@@ -52,4 +59,21 @@ func ManagementCompanySync(service managementCompanySyncService) scheduler.JobFu
 
 		return scheduler.JobCompleted(summary), nil
 	}
+}
+
+func publishManagementCompanyChanges(publisher realtime.Publisher, result *fund.SyncResult) {
+	scopes := make([]string, 0, 2)
+
+	if result.SnapshotCreated {
+		scopes = append(scopes, realtime.ScopeFundState)
+	}
+	if result.HistoryInserted > 0 || result.HistoryUpdated > 0 {
+		scopes = append(scopes, realtime.ScopeFundHistory)
+	}
+
+	if len(scopes) == 0 {
+		return
+	}
+
+	publisher.Publish(realtime.Update{Scopes: scopes})
 }
