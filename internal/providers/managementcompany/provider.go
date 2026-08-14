@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/rufond/fpr-backend/internal/fund"
 )
 
 const (
@@ -68,4 +70,17 @@ func (p *Provider) Fetch(ctx context.Context) ([]byte, error) {
 	}
 
 	return body, nil
+}
+func (p *Provider) FetchPage(ctx context.Context) (*fund.SourcePage, error) {
+	body, err := p.Fetch(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	page, err := ParsePage(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse management company fund page: %w", err)
+	}
+
+	return page, nil
 }
