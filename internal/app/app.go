@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/rufond/fpr-backend/internal/appstate"
 	"github.com/rufond/fpr-backend/internal/deps"
 	"github.com/rufond/fpr-backend/internal/fund"
 	"github.com/rufond/fpr-backend/internal/routes"
@@ -18,7 +19,8 @@ type App struct {
 }
 
 func New(d *deps.Deps) *App {
-	fundModule := fund.NewModule(d.DB, d.ManagementCompany)
+	stateManager := appstate.NewManager()
+	fundModule := fund.NewModule(d.DB, d.ManagementCompany, stateManager)
 	schedulerModule := scheduler.NewModule(d.DB, nil)
 
 	schedulerModule.Manager.MustAdd(

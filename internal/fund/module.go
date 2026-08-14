@@ -1,15 +1,19 @@
 package fund
 
-import "github.com/jackc/pgx/v5/pgxpool"
+import (
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/rufond/fpr-backend/internal/appstate"
+)
 
 type Module struct {
 	Repository *Repository
 	Service    *Service
 }
 
-func NewModule(db *pgxpool.Pool, source ManagementCompanySource) *Module {
+func NewModule(db *pgxpool.Pool, source ManagementCompanySource, state *appstate.Manager) *Module {
 	repository := NewRepository(db)
-	service := NewService(repository, source)
+	service := NewService(repository, source, state)
 
 	return &Module{
 		Repository: repository,

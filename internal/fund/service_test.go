@@ -2,8 +2,11 @@ package fund
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/rufond/fpr-backend/internal/appstate"
 )
 
 type fakeManagementCompanySource struct {
@@ -17,50 +20,75 @@ func (f *fakeManagementCompanySource) FetchPage(_ context.Context) (*SourcePage,
 	return f.page, f.err
 }
 
+type fakeFundStateResult struct {
+	state *appstate.FundState
+	err   error
+}
+
 type fakeServiceRepository struct {
-	hasSnapshots bool
+	fundStateResults []fakeFundStateResult
+	fundStateLoads   int
 
-	existing map[string]StoredDailyValue
+	existing       map[string]StoredDailyValue
+	loadDailyErr   error
+	appliedChanges DailyValueChanges
 
-	appliedChanges  DailyValueChanges
 	appliedSnapshot SourceSnapshot
 	appliedHash     string
 	appliedObserved time.Time
 
-	snapshotCreated bool
+	snapshotCreated  bool
+	appliedFundState *appstate.FundState
+	applyErr         error
 }
 
-func (f *fakeServiceRepository) HasSnapshots(_ context.Context) (bool, error) {
-	return f.hasSnapshots, nil
+func (f *fakeServiceRepository) LoadFundState(_ context.Context) (*appstate.FundState, error) {
+	if f.fundStateLoads >= len(f.fundStateResults) {
+		return nil, errors.New("unexpected LoadFundState call")
+	}
+
+	result := f.fundStateResults[f.fundStateLoads]
+	f.fundStateLoads++
+
+	return result.state, result.err
 }
 
 func (f *fakeServiceRepository) LoadDailyValues(_ context.Context) (map[string]StoredDailyValue, error) {
+	if f.loadDailyErr != nil {
+		return nil, f.loadDailyErr
+	}
 	return f.existing, nil
 }
 
-func (f *fakeServiceRepository) ApplyDailyValueChanges(_ context.Context, changes DailyValueChanges) error {
-	f.appliedChanges = changes
-	return nil
-}
-
-func (f *fakeServiceRepository) ApplySnapshot(
+func (f *fakeServiceRepository) ApplyManagementCompanySync(
 	_ context.Context,
+	changes DailyValueChanges,
 	snapshot SourceSnapshot,
 	sourceHash string,
 	observedAt time.Time,
-) (bool, error) {
+) (bool, *appstate.FundState, error) {
+	f.appliedChanges = changes
 	f.appliedSnapshot = snapshot
 	f.appliedHash = sourceHash
 	f.appliedObserved = observedAt
-	return f.snapshotCreated, nil
+
+	if f.applyErr != nil {
+		return false, nil, f.applyErr
+	}
+
+	return f.snapshotCreated, f.appliedFundState, nil
 }
 
-func TestEnsureInitializedSkipsExternalSourceWhenSnapshotExists(t *testing.T) {
+func TestEnsureInitializedLoadsPersistentStateWithoutExternalSource(t *testing.T) {
 	t.Parallel()
 
-	repository := &fakeServiceRepository{hasSnapshots: true}
+	fundState := testFundState(10)
+	repository := &fakeServiceRepository{
+		fundStateResults: []fakeFundStateResult{{state: fundState}},
+	}
 	source := &fakeManagementCompanySource{}
-	service := NewService(repository, source)
+	state := appstate.NewManager()
+	service := NewService(repository, source, state)
 
 	result, err := service.EnsureInitialized(context.Background())
 	if err != nil {
@@ -72,12 +100,50 @@ func TestEnsureInitializedSkipsExternalSourceWhenSnapshotExists(t *testing.T) {
 	if source.fetchCount != 0 {
 		t.Fatalf("source fetch count = %d, want 0", source.fetchCount)
 	}
+
+	current := state.Load()
+	if current == nil || current.Fund != fundState {
+		t.Fatalf("RAM fund state = %#v, want %#v", current, fundState)
+	}
 }
 
-func TestSyncManagementCompanyPlansHistoryAndSnapshot(t *testing.T) {
+func TestEnsureInitializedSyncsWhenPersistentStateIsEmpty(t *testing.T) {
 	t.Parallel()
 
 	page := testSourcePageForSync()
+	fundState := testFundState(11)
+	repository := &fakeServiceRepository{
+		fundStateResults: []fakeFundStateResult{{err: ErrFundStateNotFound}},
+		existing:         map[string]StoredDailyValue{},
+		snapshotCreated:  true,
+		appliedFundState: fundState,
+	}
+	source := &fakeManagementCompanySource{page: page}
+	state := appstate.NewManager()
+	service := NewService(repository, source, state)
+
+	result, err := service.EnsureInitialized(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureInitialized() error = %v", err)
+	}
+	if result == nil || !result.SnapshotCreated {
+		t.Fatalf("EnsureInitialized() result = %#v, want created snapshot", result)
+	}
+	if source.fetchCount != 1 {
+		t.Fatalf("source fetch count = %d, want 1", source.fetchCount)
+	}
+
+	current := state.Load()
+	if current == nil || current.Fund != fundState {
+		t.Fatalf("RAM fund state = %#v, want %#v", current, fundState)
+	}
+}
+
+func TestSyncManagementCompanyPersistsThenPublishesRAMState(t *testing.T) {
+	t.Parallel()
+
+	page := testSourcePageForSync()
+	persistedState := testFundState(20)
 	repository := &fakeServiceRepository{
 		existing: map[string]StoredDailyValue{
 			"2026-08-01": {
@@ -91,10 +157,17 @@ func TestSyncManagementCompanyPlansHistoryAndSnapshot(t *testing.T) {
 				NAVUSD:                 "480000000",
 			},
 		},
-		snapshotCreated: true,
+		snapshotCreated:  true,
+		appliedFundState: persistedState,
 	}
 	source := &fakeManagementCompanySource{page: page}
-	service := NewService(repository, source)
+	state := appstate.NewManager()
+	oldState := &appstate.State{Fund: testFundState(19)}
+	if err := state.Initialize(oldState); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	service := NewService(repository, source, state)
 	service.now = func() time.Time {
 		return time.Date(2026, time.August, 14, 1, 2, 3, 0, time.FixedZone("test", 2*60*60))
 	}
@@ -132,6 +205,80 @@ func TestSyncManagementCompanyPlansHistoryAndSnapshot(t *testing.T) {
 	wantObserved := time.Date(2026, time.August, 13, 23, 2, 3, 0, time.UTC)
 	if !repository.appliedObserved.Equal(wantObserved) {
 		t.Fatalf("observed_at = %s, want %s", repository.appliedObserved, wantObserved)
+	}
+
+	current := state.Load()
+	if current == oldState {
+		t.Fatal("RAM state pointer did not change after successful persistence")
+	}
+	if current == nil || current.Fund != persistedState {
+		t.Fatalf("RAM fund state = %#v, want %#v", current, persistedState)
+	}
+}
+
+func TestSyncManagementCompanyDoesNotPublishWhenPersistenceFails(t *testing.T) {
+	t.Parallel()
+
+	persistErr := errors.New("persist failed")
+	repository := &fakeServiceRepository{
+		existing: map[string]StoredDailyValue{},
+		applyErr: persistErr,
+	}
+	state := appstate.NewManager()
+	oldState := &appstate.State{Fund: testFundState(30)}
+	if err := state.Initialize(oldState); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	service := NewService(repository, &fakeManagementCompanySource{page: testSourcePageForSync()}, state)
+	_, err := service.SyncManagementCompany(context.Background())
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("SyncManagementCompany() error = %v, want %v", err, persistErr)
+	}
+	if state.Load() != oldState {
+		t.Fatal("RAM state changed after failed persistence")
+	}
+	if repository.fundStateLoads != 0 {
+		t.Fatalf("LoadFundState calls = %d, want 0 after failed persistence", repository.fundStateLoads)
+	}
+}
+
+func TestSyncManagementCompanyNoopKeepsCurrentRAMState(t *testing.T) {
+	t.Parallel()
+
+	page := testSourcePageForSync()
+	existing := make(map[string]StoredDailyValue, len(page.History))
+	for _, item := range page.History {
+		existing[item.AsOfDate.Format(time.DateOnly)] = StoredDailyValue{
+			AsOfDate:               item.AsOfDate,
+			CalculatedUnitValueUSD: item.CalculatedUnitValueUSD,
+			NAVUSD:                 item.NAVUSD,
+		}
+	}
+
+	repository := &fakeServiceRepository{
+		existing:        existing,
+		snapshotCreated: false,
+	}
+	state := appstate.NewManager()
+	oldState := &appstate.State{Fund: testFundState(40)}
+	if err := state.Initialize(oldState); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	service := NewService(repository, &fakeManagementCompanySource{page: page}, state)
+	result, err := service.SyncManagementCompany(context.Background())
+	if err != nil {
+		t.Fatalf("SyncManagementCompany() error = %v", err)
+	}
+	if result.HistoryInserted != 0 || result.HistoryUpdated != 0 || result.SnapshotCreated {
+		t.Fatalf("unexpected sync changes: %#v", result)
+	}
+	if state.Load() != oldState {
+		t.Fatal("RAM state pointer changed after noop sync")
+	}
+	if repository.fundStateLoads != 0 {
+		t.Fatalf("LoadFundState calls = %d, want 0 after noop sync", repository.fundStateLoads)
 	}
 }
 
@@ -203,6 +350,19 @@ func TestPlanDailyValueChangesInsertsMissingDateOutsideMutableWindow(t *testing.
 	}
 	if got := changes.Insert[0].AsOfDate.Format(time.DateOnly); got != "2026-07-01" {
 		t.Fatalf("inserted date = %s, want 2026-07-01", got)
+	}
+}
+
+func testFundState(snapshotID int64) *appstate.FundState {
+	return &appstate.FundState{
+		Snapshot: appstate.FundSnapshot{
+			ID:                     snapshotID,
+			AsOfDate:               time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
+			ObservedAt:             time.Date(2026, time.August, 12, 12, 0, 0, 0, time.UTC),
+			SourceHash:             "test-hash",
+			CalculatedUnitValueUSD: "31.18",
+			NAVUSD:                 "492986650",
+		},
 	}
 }
 
