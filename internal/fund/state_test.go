@@ -38,6 +38,12 @@ func TestServiceStateBuildsCurrentReadModelFromRAM(t *testing.T) {
 	if result.OfficialSnapshot.Assets[1].Instrument != nil || result.OfficialSnapshot.Assets[1].Quantity != nil {
 		t.Fatalf("cash asset optional fields = %#v", result.OfficialSnapshot.Assets[1])
 	}
+	if result.Market.UnitPrice == nil {
+		t.Fatal("market unit price is nil")
+	}
+	if result.Market.UnitPrice.InstrumentID != 99 || result.Market.UnitPrice.UnitValue != "3210.5" || result.Market.UnitPrice.Currency != "RUB" {
+		t.Fatalf("market unit price = %#v", result.Market.UnitPrice)
+	}
 }
 
 func TestServiceHistoryReturnsFullHistory(t *testing.T) {
@@ -133,61 +139,79 @@ func testStateManager(t *testing.T, instrumentID int64) *appstate.Manager {
 	t.Helper()
 
 	manager := appstate.NewManager()
-	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{
-		Snapshot: appstate.FundSnapshot{
-			ID:                     21,
-			AsOfDate:               time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
-			ObservedAt:             time.Date(2026, time.August, 13, 16, 20, 0, 0, time.UTC),
-			SourceHash:             "ignored-by-public-api",
-			CalculatedUnitValueUSD: "31.18",
-			NAVUSD:                 "492986650.00",
-			Assets: []appstate.FundAsset{
-				{
-					ID:                   1,
-					RowNo:                1,
-					SourceName:           "АО НК КазМунайГаз",
-					SourceType:           "Акции",
-					InstrumentID:         &instrumentID,
-					InstrumentType:       AssetKindEquity,
-					ISIN:                 "KZ1C00001122",
-					InstrumentName:       "АО НК КазМунайГаз",
-					Ticker:               "KMGZ",
-					Currency:             "KZT",
-					Quantity:             "584986",
-					AssetSharePercent:    "10.25",
-					AssetShareUpperBound: false,
-				},
-				{
-					ID:                   2,
-					RowNo:                2,
-					SourceName:           "",
-					SourceType:           "Денежные средства в кредитных организациях",
-					AssetSharePercent:    "4.50",
-					AssetShareUpperBound: false,
-				},
-			},
-			Categories: []appstate.FundCategory{
-				{RowNo: 1, SourceName: "Акции", AssetSharePercent: "20.50"},
-			},
-		},
-		DailyValues: []appstate.FundDailyValue{
-			{
-				AsOfDate:               time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC),
-				CalculatedUnitValueUSD: "29.80",
-				NAVUSD:                 "470000000.00",
-			},
-			{
-				AsOfDate:               time.Date(2026, time.August, 11, 0, 0, 0, 0, time.UTC),
-				CalculatedUnitValueUSD: "30.60",
-				NAVUSD:                 "483764001.84",
-			},
-			{
+	if err := manager.Initialize(&appstate.State{
+		Fund: &appstate.FundState{
+			Snapshot: appstate.FundSnapshot{
+				ID:                     21,
 				AsOfDate:               time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
+				ObservedAt:             time.Date(2026, time.August, 13, 16, 20, 0, 0, time.UTC),
+				SourceHash:             "ignored-by-public-api",
 				CalculatedUnitValueUSD: "31.18",
 				NAVUSD:                 "492986650.00",
+				Assets: []appstate.FundAsset{
+					{
+						ID:                   1,
+						RowNo:                1,
+						SourceName:           "АО НК КазМунайГаз",
+						SourceType:           "Акции",
+						InstrumentID:         &instrumentID,
+						InstrumentType:       AssetKindEquity,
+						ISIN:                 "KZ1C00001122",
+						InstrumentName:       "АО НК КазМунайГаз",
+						Ticker:               "KMGZ",
+						Currency:             "KZT",
+						Quantity:             "584986",
+						AssetSharePercent:    "10.25",
+						AssetShareUpperBound: false,
+					},
+					{
+						ID:                   2,
+						RowNo:                2,
+						SourceName:           "",
+						SourceType:           "Денежные средства в кредитных организациях",
+						AssetSharePercent:    "4.50",
+						AssetShareUpperBound: false,
+					},
+				},
+				Categories: []appstate.FundCategory{
+					{RowNo: 1, SourceName: "Акции", AssetSharePercent: "20.50"},
+				},
+			},
+			DailyValues: []appstate.FundDailyValue{
+				{
+					AsOfDate:               time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC),
+					CalculatedUnitValueUSD: "29.80",
+					NAVUSD:                 "470000000.00",
+				},
+				{
+					AsOfDate:               time.Date(2026, time.August, 11, 0, 0, 0, 0, time.UTC),
+					CalculatedUnitValueUSD: "30.60",
+					NAVUSD:                 "483764001.84",
+				},
+				{
+					AsOfDate:               time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
+					CalculatedUnitValueUSD: "31.18",
+					NAVUSD:                 "492986650.00",
+				},
 			},
 		},
-	}}); err != nil {
+		Prices: &appstate.PriceState{
+			Sources: map[int64]appstate.InstrumentPrice{
+				101: {
+					PriceSourceID:  101,
+					InstrumentID:   99,
+					AssetType:      "fund_unit",
+					ISIN:           "RU000A101NK4",
+					Name:           "Фонд первичных размещений",
+					Provider:       "moex",
+					ProviderSymbol: "TQBR:RU000A101NK4",
+					UnitValue:      "3210.5",
+					Currency:       "RUB",
+					PricedAt:       time.Date(2026, time.August, 14, 15, 42, 31, 0, time.UTC),
+				},
+			},
+		},
+	}); err != nil {
 		t.Fatalf("Initialize() error = %v", err)
 	}
 

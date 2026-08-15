@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
+	"github.com/rufond/fpr-backend/internal/prices"
 )
 
 var ErrStateUnavailable = errors.New("fund state unavailable")
 
 func (s *Service) State() (*StateResult, error) {
-	state, err := s.currentFundState()
+	state, err := s.currentState()
 	if err != nil {
 		return nil, err
 	}
@@ -29,7 +30,7 @@ func (s *Service) History(from *time.Time) (*HistoryResult, error) {
 	return buildHistoryResult(state, from), nil
 }
 
-func (s *Service) currentFundState() (*appstate.FundState, error) {
+func (s *Service) currentState() (*appstate.State, error) {
 	if s.state == nil {
 		return nil, fmt.Errorf("application state manager is not configured")
 	}
@@ -39,26 +40,39 @@ func (s *Service) currentFundState() (*appstate.FundState, error) {
 		return nil, ErrStateUnavailable
 	}
 
+	return current, nil
+}
+
+func (s *Service) currentFundState() (*appstate.FundState, error) {
+	current, err := s.currentState()
+	if err != nil {
+		return nil, err
+	}
+
 	return current.Fund, nil
 }
 
-func buildStateResult(state *appstate.FundState) *StateResult {
+func buildStateResult(state *appstate.State) *StateResult {
+	fundState := state.Fund
 	result := &StateResult{
 		OfficialSnapshot: StateOfficialSnapshot{
-			AsOfDate:               state.Snapshot.AsOfDate.Format("2006-01-02"),
-			ObservedAt:             state.Snapshot.ObservedAt,
-			CalculatedUnitValueUSD: state.Snapshot.CalculatedUnitValueUSD,
-			NAVUSD:                 state.Snapshot.NAVUSD,
-			Assets:                 make([]StateAsset, 0, len(state.Snapshot.Assets)),
-			Categories:             make([]StateCategory, 0, len(state.Snapshot.Categories)),
+			AsOfDate:               fundState.Snapshot.AsOfDate.Format("2006-01-02"),
+			ObservedAt:             fundState.Snapshot.ObservedAt,
+			CalculatedUnitValueUSD: fundState.Snapshot.CalculatedUnitValueUSD,
+			NAVUSD:                 fundState.Snapshot.NAVUSD,
+			Assets:                 make([]StateAsset, 0, len(fundState.Snapshot.Assets)),
+			Categories:             make([]StateCategory, 0, len(fundState.Snapshot.Categories)),
+		},
+		Market: StateMarket{
+			UnitPrice: stateFundUnitPrice(state.Prices),
 		},
 	}
 
-	for _, item := range state.Snapshot.Assets {
+	for _, item := range fundState.Snapshot.Assets {
 		result.OfficialSnapshot.Assets = append(result.OfficialSnapshot.Assets, stateAsset(item))
 	}
 
-	for _, item := range state.Snapshot.Categories {
+	for _, item := range fundState.Snapshot.Categories {
 		result.OfficialSnapshot.Categories = append(result.OfficialSnapshot.Categories, StateCategory{
 			RowNo:             item.RowNo,
 			SourceName:        item.SourceName,
@@ -90,6 +104,27 @@ func buildHistoryResult(state *appstate.FundState, from *time.Time) *HistoryResu
 	}
 
 	return result
+}
+
+func stateFundUnitPrice(state *appstate.PriceState) *StateMarketPrice {
+	if state == nil {
+		return nil
+	}
+
+	for _, item := range state.Sources {
+		if item.ISIN != prices.FundUnitISIN || item.Provider != prices.ProviderMOEX {
+			continue
+		}
+
+		return &StateMarketPrice{
+			InstrumentID: item.InstrumentID,
+			UnitValue:    item.UnitValue,
+			Currency:     item.Currency,
+			PricedAt:     item.PricedAt,
+		}
+	}
+
+	return nil
 }
 
 func stateAsset(item appstate.FundAsset) StateAsset {

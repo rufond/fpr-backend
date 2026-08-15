@@ -4,10 +4,22 @@ import "time"
 
 type StateResult struct {
 	OfficialSnapshot StateOfficialSnapshot `json:"official_snapshot"`
+	Market           StateMarket           `json:"market"`
 }
 
 type HistoryResult struct {
 	DailyValues []StateDailyValue `json:"daily_values"`
+}
+
+type StateMarket struct {
+	UnitPrice *StateMarketPrice `json:"unit_price"`
+}
+
+type StateMarketPrice struct {
+	InstrumentID int64     `json:"instrument_id"`
+	UnitValue    string    `json:"unit_value"`
+	Currency     string    `json:"currency"`
+	PricedAt     time.Time `json:"priced_at"`
 }
 
 type StateOfficialSnapshot struct {

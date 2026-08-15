@@ -25,12 +25,13 @@ const (
 )
 
 type Event struct {
-	Type          string    `json:"type"`
-	GenerationID  string    `json:"generation_id"`
-	Revision      uint64    `json:"revision"`
-	OccurredAt    time.Time `json:"occurred_at"`
-	Scopes        []string  `json:"scopes,omitempty"`
-	InstrumentIDs []int64   `json:"instrument_ids,omitempty"`
+	Type             string                 `json:"type"`
+	GenerationID     string                 `json:"generation_id"`
+	Revision         uint64                 `json:"revision"`
+	OccurredAt       time.Time              `json:"occurred_at"`
+	Scopes           []string               `json:"scopes,omitempty"`
+	InstrumentIDs    []int64                `json:"instrument_ids,omitempty"`
+	InstrumentPrices []InstrumentPriceDelta `json:"instrument_prices,omitempty"`
 }
 
 type client struct {
@@ -119,7 +120,13 @@ func (h *Hub) Publish(update Update) {
 		return
 	}
 
-	instrumentIDs := normalizeInstrumentIDs(update.InstrumentIDs)
+	instrumentPrices := normalizeInstrumentPrices(update.InstrumentPrices)
+	instrumentIDs := make([]int64, 0, len(update.InstrumentIDs)+len(instrumentPrices))
+	instrumentIDs = append(instrumentIDs, update.InstrumentIDs...)
+	for _, price := range instrumentPrices {
+		instrumentIDs = append(instrumentIDs, price.InstrumentID)
+	}
+	instrumentIDs = normalizeInstrumentIDs(instrumentIDs)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -131,12 +138,13 @@ func (h *Hub) Publish(update Update) {
 	h.revision++
 
 	event := Event{
-		Type:          eventTypeChanged,
-		GenerationID:  h.generationID,
-		Revision:      h.revision,
-		OccurredAt:    time.Now().UTC(),
-		Scopes:        scopes,
-		InstrumentIDs: instrumentIDs,
+		Type:             eventTypeChanged,
+		GenerationID:     h.generationID,
+		Revision:         h.revision,
+		OccurredAt:       time.Now().UTC(),
+		Scopes:           scopes,
+		InstrumentIDs:    instrumentIDs,
+		InstrumentPrices: instrumentPrices,
 	}
 
 	for subscriber := range h.clients {
@@ -230,6 +238,29 @@ func normalizeInstrumentIDs(ids []int64) []int64 {
 	}
 
 	return filtered
+}
+
+func normalizeInstrumentPrices(prices []InstrumentPriceDelta) []InstrumentPriceDelta {
+	byInstrument := make(map[int64]InstrumentPriceDelta, len(prices))
+	for _, price := range prices {
+		if price.InstrumentID <= 0 {
+			continue
+		}
+
+		price.PricedAt = price.PricedAt.UTC()
+		byInstrument[price.InstrumentID] = price
+	}
+
+	result := make([]InstrumentPriceDelta, 0, len(byInstrument))
+	for _, price := range byInstrument {
+		result = append(result, price)
+	}
+
+	sort.Slice(result, func(left, right int) bool {
+		return result[left].InstrumentID < result[right].InstrumentID
+	})
+
+	return result
 }
 
 func newGenerationID() string {

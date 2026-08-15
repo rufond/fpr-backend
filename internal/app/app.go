@@ -7,6 +7,7 @@ import (
 	"github.com/rufond/fpr-backend/internal/appstate"
 	"github.com/rufond/fpr-backend/internal/deps"
 	"github.com/rufond/fpr-backend/internal/fund"
+	"github.com/rufond/fpr-backend/internal/prices"
 	"github.com/rufond/fpr-backend/internal/realtime"
 	"github.com/rufond/fpr-backend/internal/routes"
 	"github.com/rufond/fpr-backend/internal/scheduler"
@@ -16,6 +17,7 @@ import (
 type App struct {
 	deps      *deps.Deps
 	fund      *fund.Module
+	prices    *prices.Module
 	realtime  *realtime.Hub
 	scheduler *scheduler.Module
 }
@@ -24,6 +26,7 @@ func New(d *deps.Deps) *App {
 	realtimeHub := realtime.NewHub()
 	stateManager := appstate.NewManager()
 	fundModule := fund.NewModule(d.DB, d.ManagementCompany, stateManager)
+	priceModule := prices.NewModule(d.DB, d.MOEX, stateManager)
 	schedulerModule := scheduler.NewModule(d.DB, realtimeHub)
 
 	schedulerModule.Manager.MustAdd(
@@ -32,10 +35,17 @@ func New(d *deps.Deps) *App {
 		"0 * * * *",
 		schedulerjobs.ManagementCompanySync(fundModule.Service, realtimeHub),
 	)
+	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobMOEXFundUnitSync,
+		"MOEX fund unit sync",
+		"* * * * *",
+		schedulerjobs.MOEXFundUnitSync(priceModule.Service, realtimeHub),
+	)
 
 	return &App{
 		deps:      d,
 		fund:      fundModule,
+		prices:    priceModule,
 		realtime:  realtimeHub,
 		scheduler: schedulerModule,
 	}
@@ -43,6 +53,9 @@ func New(d *deps.Deps) *App {
 
 func (a *App) Start(ctx context.Context) error {
 	if err := a.fund.Start(ctx); err != nil {
+		return err
+	}
+	if err := a.prices.Service.Start(ctx); err != nil {
 		return err
 	}
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/rufond/fpr-backend/internal/config"
 	"github.com/rufond/fpr-backend/internal/providers/managementcompany"
+	"github.com/rufond/fpr-backend/internal/providers/moex"
 )
 
 type Deps struct {
@@ -20,6 +21,7 @@ type Deps struct {
 	Logger zerolog.Logger
 
 	ManagementCompany *managementcompany.Provider
+	MOEX              *moex.Provider
 }
 
 func New(ctx context.Context, cfg *config.Config) (*Deps, error) {
@@ -35,6 +37,7 @@ func New(ctx context.Context, cfg *config.Config) (*Deps, error) {
 		DB:                db,
 		Logger:            logger,
 		ManagementCompany: managementcompany.NewProvider(cfg.ManagementCompany.FundURL, nil),
+		MOEX:              moex.NewProvider("", nil),
 	}, nil
 }
 

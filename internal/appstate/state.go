@@ -8,7 +8,30 @@ import (
 )
 
 type State struct {
-	Fund *FundState
+	Fund   *FundState
+	Prices *PriceState
+}
+
+type PriceState struct {
+	Sources map[int64]InstrumentPrice
+}
+
+type InstrumentPrice struct {
+	PriceSourceID int64
+	InstrumentID  int64
+
+	AssetType string
+	ISIN      string
+	Name      string
+
+	Provider       string
+	ProviderSymbol string
+
+	UnitValue string
+	Currency  string
+
+	PricedAt  time.Time
+	FetchedAt time.Time
 }
 
 type FundState struct {
