@@ -42,6 +42,28 @@ type storedCurrentPrice struct {
 	FetchedAt time.Time `db:"fetched_at"`
 }
 
+type storedDailyPrice struct {
+	PriceDate time.Time `db:"price_date"`
+	UnitValue string    `db:"unit_value"`
+	Currency  string    `db:"currency"`
+}
+
+type storedDailyPriceState struct {
+	PriceSourceID int64 `db:"price_source_id"`
+	InstrumentID  int64 `db:"instrument_id"`
+
+	AssetType string `db:"asset_type"`
+	ISIN      string `db:"isin"`
+	Name      string `db:"name"`
+
+	Provider       string `db:"provider"`
+	ProviderSymbol string `db:"provider_symbol"`
+
+	PriceDate time.Time `db:"price_date"`
+	UnitValue string    `db:"unit_value"`
+	Currency  string    `db:"currency"`
+}
+
 type storedPriceState struct {
 	PriceSourceID int64 `db:"price_source_id"`
 	InstrumentID  int64 `db:"instrument_id"`
@@ -141,9 +163,9 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 		return false, false, nil, appstate.InstrumentPrice{}, errCleanup
 	}
 
-	state, errState := loadPriceState(ctx, tx)
+	state, errState := loadCurrentPriceStateSnapshot(ctx, tx)
 	if errState != nil {
-		return false, false, nil, appstate.InstrumentPrice{}, fmt.Errorf("build price state after MOEX fund unit quote: %w", errState)
+		return false, false, nil, appstate.InstrumentPrice{}, fmt.Errorf("build current price state after MOEX fund unit quote: %w", errState)
 	}
 
 	price, ok := state.Sources[priceSourceID]
@@ -156,6 +178,77 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 	}
 
 	return true, false, state, price, nil
+}
+
+func (r *Repository) ApplyFundUnitMOEXDailyPrices(
+	ctx context.Context,
+	items []SourceDailyPrice,
+) (int, int, *appstate.PriceState, error) {
+	tx, errBegin := r.db.Begin(ctx)
+	if errBegin != nil {
+		return 0, 0, nil, fmt.Errorf("begin MOEX fund unit daily prices transaction: %w", errBegin)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	priceSourceID, errSource := ensureFundUnitMOEXSource(ctx, tx)
+	if errSource != nil {
+		return 0, 0, nil, errSource
+	}
+
+	stored, errStored := loadDailyPrices(ctx, tx, priceSourceID)
+	if errStored != nil {
+		return 0, 0, nil, errStored
+	}
+
+	byDate := make(map[string]storedDailyPrice, len(stored))
+	for _, item := range stored {
+		item.PriceDate = dateUTC(item.PriceDate)
+		byDate[item.PriceDate.Format("2006-01-02")] = item
+	}
+
+	inserted := 0
+	updated := 0
+
+	for _, item := range items {
+		priceDate := dateUTC(item.PriceDate)
+		key := priceDate.Format("2006-01-02")
+		previous, exists := byDate[key]
+
+		if !exists {
+			if errInsert := insertDailyPrice(ctx, tx, priceSourceID, item); errInsert != nil {
+				return 0, 0, nil, errInsert
+			}
+			inserted++
+			continue
+		}
+
+		if decimalEqual(previous.UnitValue, item.UnitValue) && previous.Currency == item.Currency {
+			continue
+		}
+
+		if errUpdate := updateDailyPrice(ctx, tx, priceSourceID, item); errUpdate != nil {
+			return 0, 0, nil, errUpdate
+		}
+		updated++
+	}
+
+	if inserted == 0 && updated == 0 {
+		if errCommit := tx.Commit(ctx); errCommit != nil {
+			return 0, 0, nil, fmt.Errorf("commit unchanged MOEX fund unit daily prices transaction: %w", errCommit)
+		}
+		return 0, 0, nil, nil
+	}
+
+	state, errState := loadPriceState(ctx, tx)
+	if errState != nil {
+		return 0, 0, nil, fmt.Errorf("build price state after MOEX fund unit daily prices: %w", errState)
+	}
+
+	if errCommit := tx.Commit(ctx); errCommit != nil {
+		return 0, 0, nil, fmt.Errorf("commit MOEX fund unit daily prices transaction: %w", errCommit)
+	}
+
+	return inserted, updated, state, nil
 }
 
 func ensureFundUnitMOEXSource(ctx context.Context, tx pgx.Tx) (int64, error) {
@@ -414,7 +507,111 @@ func deleteOldPricePoints(ctx context.Context, tx pgx.Tx, priceSourceID int64, b
 	return nil
 }
 
+func loadDailyPrices(ctx context.Context, db priceQueryer, priceSourceID int64) ([]storedDailyPrice, error) {
+	table := builder.NewTable("instrument_daily_prices")
+	query := builder.NewSelect()
+	query.From(table)
+	query.Column(
+		builder.ColumnName{Table: table, Name: "price_date"},
+		builder.ColumnName{Table: table, Name: "unit_value"},
+		builder.ColumnName{Table: table, Name: "currency"},
+	)
+	query.Where(builder.WhereEq{Table: table, Column: "price_source_id", Value: priceSourceID})
+	query.Order(builder.Order{Table: table, Column: "price_date"})
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return nil, fmt.Errorf("build fund unit daily prices query: %w", errBuild)
+	}
+
+	rows, errQuery := db.Query(ctx, sql, pgx.NamedArgs(binds))
+	if errQuery != nil {
+		return nil, fmt.Errorf("query fund unit daily prices: %w", errQuery)
+	}
+	defer rows.Close()
+
+	items, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[storedDailyPrice])
+	if errCollect != nil {
+		return nil, fmt.Errorf("collect fund unit daily prices: %w", errCollect)
+	}
+
+	for index := range items {
+		items[index].PriceDate = dateUTC(items[index].PriceDate)
+	}
+
+	return items, nil
+}
+
+func insertDailyPrice(ctx context.Context, tx pgx.Tx, priceSourceID int64, item SourceDailyPrice) error {
+	table := builder.NewTable("instrument_daily_prices")
+	query := builder.NewInsert(table)
+	query.Value("price_source_id", priceSourceID)
+	query.Value("price_date", dateUTC(item.PriceDate))
+	query.Value("unit_value", item.UnitValue)
+	query.Value("currency", item.Currency)
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return fmt.Errorf("build insert instrument daily price: %w", errBuild)
+	}
+	if _, errExec := tx.Exec(ctx, sql, pgx.NamedArgs(binds)); errExec != nil {
+		return fmt.Errorf("insert instrument daily price: %w", errExec)
+	}
+
+	return nil
+}
+
+func updateDailyPrice(ctx context.Context, tx pgx.Tx, priceSourceID int64, item SourceDailyPrice) error {
+	table := builder.NewTable("instrument_daily_prices")
+	query := builder.NewUpdate(table)
+	query.Set("unit_value", item.UnitValue)
+	query.Set("currency", item.Currency)
+	query.SetNow("updated_at")
+	query.Where(builder.WhereAnd{List: []builder.Where{
+		builder.WhereEq{Table: table, Column: "price_source_id", Value: priceSourceID},
+		builder.WhereEq{Table: table, Column: "price_date", Value: dateUTC(item.PriceDate)},
+	}})
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return fmt.Errorf("build update instrument daily price: %w", errBuild)
+	}
+	if _, errExec := tx.Exec(ctx, sql, pgx.NamedArgs(binds)); errExec != nil {
+		return fmt.Errorf("update instrument daily price: %w", errExec)
+	}
+
+	return nil
+}
+
+func loadCurrentPriceStateSnapshot(ctx context.Context, db priceQueryer) (*appstate.PriceState, error) {
+	state := &appstate.PriceState{
+		Sources: map[int64]appstate.InstrumentPrice{},
+	}
+
+	if errCurrent := loadCurrentPriceState(ctx, db, state); errCurrent != nil {
+		return nil, errCurrent
+	}
+
+	return state, nil
+}
+
 func loadPriceState(ctx context.Context, db priceQueryer) (*appstate.PriceState, error) {
+	state := &appstate.PriceState{
+		Sources:     map[int64]appstate.InstrumentPrice{},
+		DailyPrices: map[int64]appstate.InstrumentDailyPriceSeries{},
+	}
+
+	if errCurrent := loadCurrentPriceState(ctx, db, state); errCurrent != nil {
+		return nil, errCurrent
+	}
+	if errDaily := loadDailyPriceState(ctx, db, state); errDaily != nil {
+		return nil, errDaily
+	}
+
+	return state, nil
+}
+
+func loadCurrentPriceState(ctx context.Context, db priceQueryer, state *appstate.PriceState) error {
 	instruments := builder.NewTable("instruments")
 	sources := builder.NewTable("instrument_price_sources")
 	prices := builder.NewTable("instrument_prices")
@@ -441,29 +638,94 @@ func loadPriceState(ctx context.Context, db priceQueryer) (*appstate.PriceState,
 
 	sql, binds, errBuild := query.Get()
 	if errBuild != nil {
-		return nil, fmt.Errorf("build price state query: %w", errBuild)
+		return fmt.Errorf("build current price state query: %w", errBuild)
 	}
 
 	rows, errQuery := db.Query(ctx, sql, pgx.NamedArgs(binds))
 	if errQuery != nil {
-		return nil, fmt.Errorf("query price state: %w", errQuery)
+		return fmt.Errorf("query current price state: %w", errQuery)
 	}
 	defer rows.Close()
 
 	stored, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[storedPriceState])
 	if errCollect != nil {
-		return nil, fmt.Errorf("collect price state: %w", errCollect)
-	}
-
-	state := &appstate.PriceState{
-		Sources: make(map[int64]appstate.InstrumentPrice, len(stored)),
+		return fmt.Errorf("collect current price state: %w", errCollect)
 	}
 
 	for _, item := range stored {
 		state.Sources[item.PriceSourceID] = instrumentPrice(item)
 	}
 
-	return state, nil
+	return nil
+}
+
+func loadDailyPriceState(ctx context.Context, db priceQueryer, state *appstate.PriceState) error {
+	instruments := builder.NewTable("instruments")
+	sources := builder.NewTable("instrument_price_sources")
+	dailyPrices := builder.NewTable("instrument_daily_prices")
+
+	query := builder.NewSelect()
+	query.From(dailyPrices)
+	query.LeftJoin(sources, builder.OnEq{Table1: dailyPrices, Column1: "price_source_id", Table2: sources, Column2: "id"})
+	query.LeftJoin(instruments, builder.OnEq{Table1: sources, Column1: "instrument_id", Table2: instruments, Column2: "id"})
+	query.Column(
+		builder.ColumnName{Table: dailyPrices, Name: "price_source_id"},
+		builder.ColumnName{Table: sources, Name: "instrument_id"},
+		builder.ColumnName{Table: instruments, Name: "asset_type"},
+		builder.ColumnName{Table: instruments, Name: "isin"},
+		builder.ColumnName{Table: instruments, Name: "name"},
+		builder.ColumnName{Table: sources, Name: "provider"},
+		builder.ColumnName{Table: sources, Name: "provider_symbol"},
+		builder.ColumnName{Table: dailyPrices, Name: "price_date"},
+		builder.ColumnName{Table: dailyPrices, Name: "unit_value"},
+		builder.ColumnName{Table: dailyPrices, Name: "currency"},
+	)
+	query.Where(builder.WhereEq{Table: sources, Column: "enabled", Value: true})
+	query.Order(
+		builder.Order{Table: dailyPrices, Column: "price_source_id"},
+		builder.Order{Table: dailyPrices, Column: "price_date"},
+	)
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return fmt.Errorf("build daily price state query: %w", errBuild)
+	}
+
+	rows, errQuery := db.Query(ctx, sql, pgx.NamedArgs(binds))
+	if errQuery != nil {
+		return fmt.Errorf("query daily price state: %w", errQuery)
+	}
+	defer rows.Close()
+
+	stored, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[storedDailyPriceState])
+	if errCollect != nil {
+		return fmt.Errorf("collect daily price state: %w", errCollect)
+	}
+
+	for _, item := range stored {
+		series, exists := state.DailyPrices[item.PriceSourceID]
+		if !exists {
+			series = appstate.InstrumentDailyPriceSeries{
+				PriceSourceID:  item.PriceSourceID,
+				InstrumentID:   item.InstrumentID,
+				AssetType:      item.AssetType,
+				ISIN:           item.ISIN,
+				Name:           item.Name,
+				Provider:       item.Provider,
+				ProviderSymbol: item.ProviderSymbol,
+				Items:          []appstate.InstrumentDailyPrice{},
+			}
+		}
+
+		series.Items = append(series.Items, appstate.InstrumentDailyPrice{
+			PriceDate: dateUTC(item.PriceDate),
+			UnitValue: item.UnitValue,
+			Currency:  item.Currency,
+		})
+		state.DailyPrices[item.PriceSourceID] = series
+	}
+
+	return nil
 }
 
 func loadInstrumentPrice(ctx context.Context, db priceQueryer, priceSourceID int64) (appstate.InstrumentPrice, error) {

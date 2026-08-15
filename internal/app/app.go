@@ -41,6 +41,12 @@ func New(d *deps.Deps) *App {
 		"* * * * *",
 		schedulerjobs.MOEXFundUnitSync(priceModule.Service, realtimeHub),
 	)
+	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobMOEXFundUnitHistorySync,
+		"MOEX fund unit history sync",
+		"10 * * * *",
+		schedulerjobs.MOEXFundUnitHistorySync(priceModule.Service, realtimeHub),
+	)
 
 	return &App{
 		deps:      d,

@@ -15,8 +15,9 @@ const (
 	FundUnitName      = "Фонд первичных размещений"
 )
 
-type QuoteSource interface {
+type Source interface {
 	FetchFundUnitQuote(ctx context.Context) (*SourceQuote, error)
+	FetchFundUnitDailyPrices(ctx context.Context, from time.Time) ([]SourceDailyPrice, error)
 }
 
 type SourceQuote struct {
@@ -26,9 +27,26 @@ type SourceQuote struct {
 	Source    string
 }
 
+type SourceDailyPrice struct {
+	PriceDate time.Time
+	UnitValue string
+	Currency  string
+}
+
 type SyncResult struct {
 	Changed bool
 	Stale   bool
 	Source  string
 	Price   appstate.InstrumentPrice
+}
+
+type DailySyncResult struct {
+	Inserted int
+	Updated  int
+	FromDate time.Time
+	ToDate   time.Time
+}
+
+func (r DailySyncResult) Changed() bool {
+	return r.Inserted != 0 || r.Updated != 0
 }

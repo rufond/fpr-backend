@@ -8,7 +8,8 @@ type StateResult struct {
 }
 
 type HistoryResult struct {
-	DailyValues []StateDailyValue `json:"daily_values"`
+	DailyValues      []StateDailyValue       `json:"daily_values"`
+	UnitMarketPrices []StateDailyMarketPrice `json:"unit_market_prices"`
 }
 
 type StateMarket struct {
@@ -65,4 +66,10 @@ type StateDailyValue struct {
 	AsOfDate               string `json:"as_of_date"`
 	CalculatedUnitValueUSD string `json:"calculated_unit_value_usd"`
 	NAVUSD                 string `json:"nav_usd"`
+}
+
+type StateDailyMarketPrice struct {
+	AsOfDate  string `json:"as_of_date"`
+	UnitValue string `json:"unit_value"`
+	Currency  string `json:"currency"`
 }

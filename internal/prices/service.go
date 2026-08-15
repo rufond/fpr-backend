@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
 )
+
+var fundUnitHistoryStartDate = time.Date(2020, time.February, 5, 0, 0, 0, 0, time.UTC)
 
 type serviceRepository interface {
 	EnsureFundUnitMOEXSource(ctx context.Context) error
@@ -18,16 +21,20 @@ type serviceRepository interface {
 		quote SourceQuote,
 		fetchedAt time.Time,
 	) (changed bool, stale bool, state *appstate.PriceState, price appstate.InstrumentPrice, err error)
+	ApplyFundUnitMOEXDailyPrices(
+		ctx context.Context,
+		items []SourceDailyPrice,
+	) (inserted int, updated int, state *appstate.PriceState, err error)
 }
 
 type Service struct {
 	repository serviceRepository
-	source     QuoteSource
+	source     Source
 	state      *appstate.Manager
 	now        func() time.Time
 }
 
-func NewService(repository serviceRepository, source QuoteSource, state *appstate.Manager) *Service {
+func NewService(repository serviceRepository, source Source, state *appstate.Manager) *Service {
 	return &Service{
 		repository: repository,
 		source:     source,
@@ -110,6 +117,9 @@ func (s *Service) SyncFundUnitMOEX(ctx context.Context) (*SyncResult, error) {
 		if priceState == nil {
 			return nil, fmt.Errorf("MOEX quote update returned no price state")
 		}
+		if current.Prices != nil {
+			priceState.DailyPrices = current.Prices.DailyPrices
+		}
 
 		next := &appstate.State{}
 		*next = *current
@@ -123,19 +133,144 @@ func (s *Service) SyncFundUnitMOEX(ctx context.Context) (*SyncResult, error) {
 	return result, nil
 }
 
+func (s *Service) SyncFundUnitMOEXHistory(ctx context.Context) (*DailySyncResult, error) {
+	if s.repository == nil {
+		return nil, fmt.Errorf("price repository is not configured")
+	}
+	if s.source == nil {
+		return nil, fmt.Errorf("MOEX source is not configured")
+	}
+	if s.state == nil {
+		return nil, fmt.Errorf("application state manager is not configured")
+	}
+
+	current := s.state.Load()
+	if current == nil {
+		return nil, fmt.Errorf("application state is not initialized")
+	}
+
+	from := fundUnitMOEXHistoryFrom(current.Prices)
+	items, errFetch := s.source.FetchFundUnitDailyPrices(ctx, from)
+	if errFetch != nil {
+		return nil, fmt.Errorf("fetch MOEX fund unit daily prices: %w", errFetch)
+	}
+
+	normalized, errNormalize := normalizeFundUnitMOEXDailyPrices(items)
+	if errNormalize != nil {
+		return nil, errNormalize
+	}
+
+	result := &DailySyncResult{FromDate: from}
+	if len(normalized) != 0 {
+		result.ToDate = normalized[len(normalized)-1].PriceDate
+	}
+
+	errUpdate := s.state.Update(func(currentState *appstate.State) (*appstate.State, error) {
+		if currentState == nil {
+			return nil, fmt.Errorf("application state is not initialized")
+		}
+
+		inserted, updated, priceState, errApply := s.repository.ApplyFundUnitMOEXDailyPrices(ctx, normalized)
+		if errApply != nil {
+			return nil, errApply
+		}
+
+		result.Inserted = inserted
+		result.Updated = updated
+
+		if !result.Changed() {
+			return currentState, nil
+		}
+		if priceState == nil {
+			return nil, fmt.Errorf("MOEX daily price update returned no price state")
+		}
+
+		next := &appstate.State{}
+		*next = *currentState
+		next.Prices = priceState
+		return next, nil
+	})
+	if errUpdate != nil {
+		return nil, errUpdate
+	}
+
+	return result, nil
+}
+
+func fundUnitMOEXHistoryFrom(state *appstate.PriceState) time.Time {
+	latest := time.Time{}
+
+	if state != nil {
+		for _, series := range state.DailyPrices {
+			if series.ISIN != FundUnitISIN || series.Provider != ProviderMOEX {
+				continue
+			}
+
+			for _, item := range series.Items {
+				priceDate := dateUTC(item.PriceDate)
+				if priceDate.After(latest) {
+					latest = priceDate
+				}
+			}
+		}
+	}
+
+	if latest.IsZero() {
+		return fundUnitHistoryStartDate
+	}
+
+	if latest.Before(fundUnitHistoryStartDate) {
+		return fundUnitHistoryStartDate
+	}
+
+	return latest
+}
+
+func normalizeFundUnitMOEXDailyPrices(items []SourceDailyPrice) ([]SourceDailyPrice, error) {
+	result := make([]SourceDailyPrice, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+
+	for _, item := range items {
+		item.PriceDate = dateUTC(item.PriceDate)
+		if item.PriceDate.IsZero() {
+			return nil, fmt.Errorf("MOEX fund unit daily price has zero price date")
+		}
+
+		value, ok := new(big.Rat).SetString(strings.TrimSpace(item.UnitValue))
+		if !ok || value.Sign() <= 0 {
+			return nil, fmt.Errorf("MOEX fund unit daily price has invalid unit value %q", item.UnitValue)
+		}
+
+		currency := strings.TrimSpace(item.Currency)
+		if !validCurrency(currency) {
+			return nil, fmt.Errorf("MOEX fund unit daily price has invalid currency %q", item.Currency)
+		}
+
+		key := item.PriceDate.Format("2006-01-02")
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("MOEX fund unit daily prices contain duplicate date %s", key)
+		}
+		seen[key] = struct{}{}
+
+		item.UnitValue = strings.TrimSpace(item.UnitValue)
+		item.Currency = currency
+		result = append(result, item)
+	}
+
+	sort.Slice(result, func(left int, right int) bool {
+		return result[left].PriceDate.Before(result[right].PriceDate)
+	})
+
+	return result, nil
+}
+
 func validateFundUnitMOEXQuote(quote SourceQuote) error {
 	value, ok := new(big.Rat).SetString(strings.TrimSpace(quote.UnitValue))
 	if !ok || value.Sign() <= 0 {
 		return fmt.Errorf("MOEX fund unit quote has invalid unit value %q", quote.UnitValue)
 	}
-	currency := strings.TrimSpace(quote.Currency)
-	if len(currency) != 3 {
+	if !validCurrency(strings.TrimSpace(quote.Currency)) {
 		return fmt.Errorf("MOEX fund unit quote has invalid currency %q", quote.Currency)
-	}
-	for _, char := range currency {
-		if char < 'A' || char > 'Z' {
-			return fmt.Errorf("MOEX fund unit quote has invalid currency %q", quote.Currency)
-		}
 	}
 	if quote.PricedAt.IsZero() {
 		return fmt.Errorf("MOEX fund unit quote has zero priced_at")
@@ -145,4 +280,23 @@ func validateFundUnitMOEXQuote(quote SourceQuote) error {
 	}
 
 	return nil
+}
+
+func validCurrency(currency string) bool {
+	if len(currency) != 3 {
+		return false
+	}
+	for _, char := range currency {
+		if char < 'A' || char > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+func dateUTC(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Time{}
+	}
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
 }

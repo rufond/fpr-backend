@@ -44,6 +44,9 @@ func TestHandlerHistory(t *testing.T) {
 	if len(result.DailyValues) != 2 || result.DailyValues[0].AsOfDate != "2026-08-11" {
 		t.Fatalf("daily values = %#v", result.DailyValues)
 	}
+	if len(result.UnitMarketPrices) != 2 || result.UnitMarketPrices[0].AsOfDate != "2026-08-11" {
+		t.Fatalf("unit market prices = %#v", result.UnitMarketPrices)
+	}
 }
 
 func TestHandlerHistoryWithoutFrom(t *testing.T) {
@@ -64,6 +67,9 @@ func TestHandlerHistoryWithoutFrom(t *testing.T) {
 	}
 	if len(result.DailyValues) != 3 {
 		t.Fatalf("len(daily values) = %d, want 3", len(result.DailyValues))
+	}
+	if len(result.UnitMarketPrices) != 3 {
+		t.Fatalf("len(unit market prices) = %d, want 3", len(result.UnitMarketPrices))
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,9 +23,12 @@ const (
 	defaultBaseURL  = "https://iss.moex.com"
 	requestTimeout  = 15 * time.Second
 	maxResponseSize = 1 << 20
+	maxHistoryPages = 100
 )
 
 var moscowLocation = time.FixedZone("MSK", 3*60*60)
+
+var _ prices.Source = (*Provider)(nil)
 
 type Provider struct {
 	baseURL string
@@ -52,6 +57,10 @@ type issSecurityResponse struct {
 type issQuoteResponse struct {
 	MarketData issBlock `json:"marketdata"`
 	Securities issBlock `json:"securities"`
+}
+
+type issCandlesResponse struct {
+	Candles issBlock `json:"candles"`
 }
 
 func NewProvider(baseURL string, client *http.Client) *Provider {
@@ -96,6 +105,123 @@ func (p *Provider) FetchFundUnitQuote(ctx context.Context) (*prices.SourceQuote,
 	}
 
 	return quote, nil
+}
+
+func (p *Provider) FetchFundUnitDailyPrices(ctx context.Context, from time.Time) ([]prices.SourceDailyPrice, error) {
+	from = calendarDateUTC(from)
+	till := p.previousMoscowDate()
+	if from.After(till) {
+		return []prices.SourceDailyPrice{}, nil
+	}
+
+	currentBoard, errBoard := p.resolvePrimaryBoard(ctx, false)
+	if errBoard != nil {
+		return nil, fmt.Errorf("resolve MOEX fund unit primary board for daily prices: %w", errBoard)
+	}
+
+	items := make([]prices.SourceDailyPrice, 0, 512)
+	start := 0
+
+	for range maxHistoryPages {
+		requestURL, errURL := url.Parse(
+			p.baseURL + "/iss/engines/stock/markets/shares/securities/" +
+				url.PathEscape(prices.FundUnitISIN) + "/candles.json",
+		)
+		if errURL != nil {
+			return nil, fmt.Errorf("build MOEX fund unit daily candles URL: %w", errURL)
+		}
+
+		query := requestURL.Query()
+		query.Set("iss.meta", "off")
+		query.Set("iss.only", "candles")
+		query.Set("candles.columns", "close,begin")
+		query.Set("interval", "24")
+		query.Set("from", from.Format("2006-01-02"))
+		query.Set("till", till.Format("2006-01-02"))
+		query.Set("start", strconv.Itoa(start))
+		requestURL.RawQuery = query.Encode()
+
+		var payload issCandlesResponse
+		if err := p.fetchJSON(ctx, requestURL, &payload); err != nil {
+			return nil, fmt.Errorf("request MOEX fund unit daily candles: %w", err)
+		}
+
+		if len(payload.Candles.Data) == 0 {
+			return normalizeDailyPrices(items)
+		}
+
+		for _, data := range payload.Candles.Data {
+			row, ok := rowMap(payload.Candles.Columns, data)
+			if !ok {
+				return nil, fmt.Errorf("MOEX fund unit daily candle has invalid row shape")
+			}
+
+			if row["close"] == nil {
+				continue
+			}
+
+			unitValue, okValue := positiveDecimal(row["close"])
+			if !okValue {
+				return nil, fmt.Errorf("MOEX fund unit daily candle has invalid close value")
+			}
+
+			begin, okBegin := stringValue(row["begin"])
+			if !okBegin || len(begin) < len("2006-01-02") {
+				return nil, fmt.Errorf("MOEX fund unit daily candle has invalid begin value")
+			}
+
+			priceDate, errDate := time.Parse("2006-01-02", begin[:10])
+			if errDate != nil {
+				return nil, fmt.Errorf("parse MOEX fund unit daily candle date %q: %w", begin, errDate)
+			}
+
+			items = append(items, prices.SourceDailyPrice{
+				PriceDate: priceDate,
+				UnitValue: unitValue,
+				Currency:  currentBoard.Currency,
+			})
+		}
+
+		start += len(payload.Candles.Data)
+	}
+
+	return nil, fmt.Errorf("MOEX fund unit daily candles exceeded %d pages", maxHistoryPages)
+}
+
+func (p *Provider) previousMoscowDate() time.Time {
+	now := p.now().In(moscowLocation)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	return today.AddDate(0, 0, -1)
+}
+
+func normalizeDailyPrices(items []prices.SourceDailyPrice) ([]prices.SourceDailyPrice, error) {
+	sort.Slice(items, func(left int, right int) bool {
+		return items[left].PriceDate.Before(items[right].PriceDate)
+	})
+
+	result := make([]prices.SourceDailyPrice, 0, len(items))
+	for _, item := range items {
+		item.PriceDate = calendarDateUTC(item.PriceDate)
+
+		if len(result) != 0 && result[len(result)-1].PriceDate.Equal(item.PriceDate) {
+			previous := result[len(result)-1]
+			if previous.UnitValue != item.UnitValue || previous.Currency != item.Currency {
+				return nil, fmt.Errorf("MOEX returned conflicting daily candles for %s", item.PriceDate.Format("2006-01-02"))
+			}
+			continue
+		}
+
+		result = append(result, item)
+	}
+
+	return result, nil
+}
+
+func calendarDateUTC(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Time{}
+	}
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 func (p *Provider) resolvePrimaryBoard(ctx context.Context, force bool) (board, error) {

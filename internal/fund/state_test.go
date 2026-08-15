@@ -63,6 +63,12 @@ func TestServiceHistoryReturnsFullHistory(t *testing.T) {
 	if result.DailyValues[0].AsOfDate != "2026-08-10" || result.DailyValues[2].AsOfDate != "2026-08-12" {
 		t.Fatalf("daily values = %#v", result.DailyValues)
 	}
+	if len(result.UnitMarketPrices) != 3 {
+		t.Fatalf("unit market prices len = %d, want 3", len(result.UnitMarketPrices))
+	}
+	if result.UnitMarketPrices[0].AsOfDate != "2026-08-10" || result.UnitMarketPrices[2].AsOfDate != "2026-08-12" {
+		t.Fatalf("unit market prices = %#v", result.UnitMarketPrices)
+	}
 }
 
 func TestServiceHistoryFiltersFromDateInclusively(t *testing.T) {
@@ -82,6 +88,12 @@ func TestServiceHistoryFiltersFromDateInclusively(t *testing.T) {
 	}
 	if result.DailyValues[0].AsOfDate != "2026-08-11" || result.DailyValues[1].AsOfDate != "2026-08-12" {
 		t.Fatalf("daily values = %#v", result.DailyValues)
+	}
+	if len(result.UnitMarketPrices) != 2 {
+		t.Fatalf("unit market prices len = %d, want 2", len(result.UnitMarketPrices))
+	}
+	if result.UnitMarketPrices[0].AsOfDate != "2026-08-11" || result.UnitMarketPrices[1].AsOfDate != "2026-08-12" {
+		t.Fatalf("unit market prices = %#v", result.UnitMarketPrices)
 	}
 }
 
@@ -103,6 +115,7 @@ func TestServiceStateAndHistoryDoNotExposeMutableRAMSlices(t *testing.T) {
 	state.OfficialSnapshot.Assets[0].SourceType = "changed"
 	state.OfficialSnapshot.Categories[0].SourceName = "changed"
 	history.DailyValues[0].NAVUSD = "1"
+	history.UnitMarketPrices[0].UnitValue = "1"
 
 	stateAgain, errStateAgain := service.State()
 	if errStateAgain != nil {
@@ -115,7 +128,8 @@ func TestServiceStateAndHistoryDoNotExposeMutableRAMSlices(t *testing.T) {
 
 	if stateAgain.OfficialSnapshot.Assets[0].SourceType != "Акции" ||
 		stateAgain.OfficialSnapshot.Categories[0].SourceName != "Акции" ||
-		historyAgain.DailyValues[0].NAVUSD != "470000000.00" {
+		historyAgain.DailyValues[0].NAVUSD != "470000000.00" ||
+		historyAgain.UnitMarketPrices[0].UnitValue != "3100" {
 		t.Fatalf("public result mutated RAM state: state=%#v history=%#v", stateAgain, historyAgain)
 	}
 }
@@ -208,6 +222,22 @@ func testStateManager(t *testing.T, instrumentID int64) *appstate.Manager {
 					UnitValue:      "3210.5",
 					Currency:       "RUB",
 					PricedAt:       time.Date(2026, time.August, 14, 15, 42, 31, 0, time.UTC),
+				},
+			},
+			DailyPrices: map[int64]appstate.InstrumentDailyPriceSeries{
+				101: {
+					PriceSourceID:  101,
+					InstrumentID:   99,
+					AssetType:      "fund_unit",
+					ISIN:           "RU000A101NK4",
+					Name:           "Фонд первичных размещений",
+					Provider:       "moex",
+					ProviderSymbol: "RU000A101NK4",
+					Items: []appstate.InstrumentDailyPrice{
+						{PriceDate: time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC), UnitValue: "3100", Currency: "RUB"},
+						{PriceDate: time.Date(2026, time.August, 11, 0, 0, 0, 0, time.UTC), UnitValue: "3150", Currency: "RUB"},
+						{PriceDate: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC), UnitValue: "3200", Currency: "RUB"},
+					},
 				},
 			},
 		},

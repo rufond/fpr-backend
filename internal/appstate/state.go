@@ -13,7 +13,28 @@ type State struct {
 }
 
 type PriceState struct {
-	Sources map[int64]InstrumentPrice
+	Sources     map[int64]InstrumentPrice
+	DailyPrices map[int64]InstrumentDailyPriceSeries
+}
+
+type InstrumentDailyPriceSeries struct {
+	PriceSourceID int64
+	InstrumentID  int64
+
+	AssetType string
+	ISIN      string
+	Name      string
+
+	Provider       string
+	ProviderSymbol string
+
+	Items []InstrumentDailyPrice
+}
+
+type InstrumentDailyPrice struct {
+	PriceDate time.Time
+	UnitValue string
+	Currency  string
 }
 
 type InstrumentPrice struct {
