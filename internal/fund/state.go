@@ -3,7 +3,7 @@ package fund
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
@@ -47,7 +47,7 @@ func buildStateResult(state *appstate.State) *StateResult {
 	fundState := state.Fund
 	result := &StateResult{
 		OfficialSnapshot: StateOfficialSnapshot{
-			AsOfDate:               fundState.Snapshot.AsOfDate.Format("2006-01-02"),
+			AsOfDate:               fundState.Snapshot.AsOfDate.Format(time.DateOnly),
 			ObservedAt:             fundState.Snapshot.ObservedAt,
 			CalculatedUnitValueUSD: fundState.Snapshot.CalculatedUnitValueUSD,
 			NAVUSD:                 fundState.Snapshot.NAVUSD,
@@ -78,8 +78,8 @@ func buildHistoryResult(state *appstate.State, from *time.Time) *HistoryResult {
 	fundState := state.Fund
 	start := 0
 	if from != nil {
-		start = sort.Search(len(fundState.DailyValues), func(index int) bool {
-			return !fundState.DailyValues[index].AsOfDate.Before(*from)
+		start, _ = slices.BinarySearchFunc(fundState.DailyValues, *from, func(item appstate.FundDailyValue, target time.Time) int {
+			return item.AsOfDate.Compare(target)
 		})
 	}
 
@@ -90,7 +90,7 @@ func buildHistoryResult(state *appstate.State, from *time.Time) *HistoryResult {
 
 	for _, item := range fundState.DailyValues[start:] {
 		result.DailyValues = append(result.DailyValues, StateDailyValue{
-			AsOfDate:               item.AsOfDate.Format("2006-01-02"),
+			AsOfDate:               item.AsOfDate.Format(time.DateOnly),
 			CalculatedUnitValueUSD: item.CalculatedUnitValueUSD,
 			NAVUSD:                 item.NAVUSD,
 		})
@@ -99,15 +99,15 @@ func buildHistoryResult(state *appstate.State, from *time.Time) *HistoryResult {
 	series := stateFundUnitDailyPrices(state.Prices)
 	marketStart := 0
 	if from != nil {
-		marketStart = sort.Search(len(series), func(index int) bool {
-			return !series[index].PriceDate.Before(*from)
+		marketStart, _ = slices.BinarySearchFunc(series, *from, func(item appstate.InstrumentDailyPrice, target time.Time) int {
+			return item.PriceDate.Compare(target)
 		})
 	}
 
 	result.UnitMarketPrices = make([]StateDailyMarketPrice, 0, len(series)-marketStart)
 	for _, item := range series[marketStart:] {
 		result.UnitMarketPrices = append(result.UnitMarketPrices, StateDailyMarketPrice{
-			AsOfDate:  item.PriceDate.Format("2006-01-02"),
+			AsOfDate:  item.PriceDate.Format(time.DateOnly),
 			UnitValue: item.UnitValue,
 			Currency:  item.Currency,
 		})
@@ -156,10 +156,15 @@ func stateAsset(item appstate.FundAsset) StateAsset {
 		RowNo:                item.RowNo,
 		SourceName:           item.SourceName,
 		SourceType:           item.SourceType,
-		Currency:             optionalString(item.Currency),
-		Quantity:             optionalString(item.Quantity),
 		AssetSharePercent:    item.AssetSharePercent,
 		AssetShareUpperBound: item.AssetShareUpperBound,
+	}
+
+	if item.Currency != "" {
+		result.Currency = new(item.Currency)
+	}
+	if item.Quantity != "" {
+		result.Quantity = new(item.Quantity)
 	}
 
 	if item.InstrumentID != nil {
@@ -174,13 +179,4 @@ func stateAsset(item appstate.FundAsset) StateAsset {
 	}
 
 	return result
-}
-
-func optionalString(value string) *string {
-	if value == "" {
-		return nil
-	}
-
-	result := value
-	return &result
 }

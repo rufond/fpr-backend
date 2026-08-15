@@ -76,8 +76,7 @@ func (r *Repository) LatestFinishedRun(ctx context.Context, jobKey string) (*Job
 	result.StartedAt = result.StartedAt.UTC()
 
 	if result.FinishedAt != nil {
-		finishedAt := result.FinishedAt.UTC()
-		result.FinishedAt = &finishedAt
+		result.FinishedAt = new(result.FinishedAt.UTC())
 	}
 
 	return result, nil

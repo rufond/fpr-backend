@@ -44,7 +44,7 @@ func (h *Handler) History(request routes.Request) (int, error, any) {
 
 	fromText := strings.TrimSpace(r.From)
 	if fromText != "" {
-		fromDate, errParse := time.Parse("2006-01-02", fromText)
+		fromDate, errParse := time.Parse(time.DateOnly, fromText)
 		if errParse != nil {
 			return http.StatusUnprocessableEntity, nil, map[string]any{
 				"errors": map[string]string{
@@ -53,7 +53,7 @@ func (h *Handler) History(request routes.Request) (int, error, any) {
 			}
 		}
 
-		from = &fromDate
+		from = new(fromDate)
 	}
 
 	result, err := h.service.History(from)

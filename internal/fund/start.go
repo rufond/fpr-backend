@@ -3,6 +3,7 @@ package fund
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -19,7 +20,7 @@ func (m *Module) Start(ctx context.Context) error {
 
 	for _, conflict := range result.HistoryConflicts {
 		log.Warn().
-			Str("date", conflict.AsOfDate.Format("2006-01-02")).
+			Str("date", conflict.AsOfDate.Format(time.DateOnly)).
 			Str("stored_calculated_unit_value_usd", conflict.StoredCalculatedUnitValueUSD).
 			Str("source_calculated_unit_value_usd", conflict.SourceCalculatedUnitValueUSD).
 			Str("stored_nav_usd", conflict.StoredNAVUSD).

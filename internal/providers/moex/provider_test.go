@@ -261,10 +261,10 @@ func TestFetchFundUnitDailyPricesUsesBoardlessCandlesForCompletedMoscowDays(t *t
 	if len(items) != 2 {
 		t.Fatalf("items = %#v", items)
 	}
-	if items[0].PriceDate.Format("2006-01-02") != "2026-08-13" || items[0].UnitValue != "3180" || items[0].Currency != "RUB" {
+	if items[0].PriceDate.Format(time.DateOnly) != "2026-08-13" || items[0].UnitValue != "3180" || items[0].Currency != "RUB" {
 		t.Fatalf("first item = %#v", items[0])
 	}
-	if items[1].PriceDate.Format("2006-01-02") != "2026-08-14" || items[1].UnitValue != "3200.5" || items[1].Currency != "RUB" {
+	if items[1].PriceDate.Format(time.DateOnly) != "2026-08-14" || items[1].UnitValue != "3200.5" || items[1].Currency != "RUB" {
 		t.Fatalf("second item = %#v", items[1])
 	}
 	if candleRequests.Load() != 2 {

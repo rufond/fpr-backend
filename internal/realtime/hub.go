@@ -1,12 +1,11 @@
 package realtime
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"net/http"
 	"slices"
-	"sort"
 	"sync"
 	"time"
 
@@ -49,7 +48,7 @@ type Hub struct {
 
 func NewHub() *Hub {
 	return &Hub{
-		generationID: newGenerationID(),
+		generationID: rand.Text(),
 		clients:      map[*client]struct{}{},
 	}
 }
@@ -211,33 +210,19 @@ func (h *Hub) unregister(subscriber *client) {
 }
 
 func normalizeScopes(scopes []string) []string {
-	result := slices.Clone(scopes)
-	sort.Strings(result)
-	result = slices.Compact(result)
-
-	filtered := result[:0]
-	for _, scope := range result {
-		if scope != "" {
-			filtered = append(filtered, scope)
-		}
-	}
-
-	return filtered
+	result := slices.DeleteFunc(slices.Clone(scopes), func(scope string) bool {
+		return scope == ""
+	})
+	slices.Sort(result)
+	return slices.Compact(result)
 }
 
 func normalizeInstrumentIDs(ids []int64) []int64 {
-	result := slices.Clone(ids)
+	result := slices.DeleteFunc(slices.Clone(ids), func(id int64) bool {
+		return id <= 0
+	})
 	slices.Sort(result)
-	result = slices.Compact(result)
-
-	filtered := result[:0]
-	for _, id := range result {
-		if id > 0 {
-			filtered = append(filtered, id)
-		}
-	}
-
-	return filtered
+	return slices.Compact(result)
 }
 
 func normalizeInstrumentPrices(prices []InstrumentPriceDelta) []InstrumentPriceDelta {
@@ -256,19 +241,9 @@ func normalizeInstrumentPrices(prices []InstrumentPriceDelta) []InstrumentPriceD
 		result = append(result, price)
 	}
 
-	sort.Slice(result, func(left, right int) bool {
-		return result[left].InstrumentID < result[right].InstrumentID
+	slices.SortFunc(result, func(left, right InstrumentPriceDelta) int {
+		return cmp.Compare(left.InstrumentID, right.InstrumentID)
 	})
 
 	return result
-}
-
-func newGenerationID() string {
-	var value [16]byte
-
-	if _, err := rand.Read(value[:]); err == nil {
-		return hex.EncodeToString(value[:])
-	}
-
-	return time.Now().UTC().Format("20060102T150405.000000000")
 }

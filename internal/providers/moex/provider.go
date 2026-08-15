@@ -6,15 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rufond/fpr-backend/internal/currency"
+	"github.com/rufond/fpr-backend/internal/dateonly"
+	"github.com/rufond/fpr-backend/internal/decimal"
 	"github.com/rufond/fpr-backend/internal/prices"
 	"github.com/rufond/fpr-backend/internal/providers"
 )
@@ -108,7 +110,7 @@ func (p *Provider) FetchFundUnitQuote(ctx context.Context) (*prices.SourceQuote,
 }
 
 func (p *Provider) FetchFundUnitDailyPrices(ctx context.Context, from time.Time) ([]prices.SourceDailyPrice, error) {
-	from = calendarDateUTC(from)
+	from = dateonly.UTC(from)
 	till := p.previousMoscowDate()
 	if from.After(till) {
 		return []prices.SourceDailyPrice{}, nil
@@ -136,8 +138,8 @@ func (p *Provider) FetchFundUnitDailyPrices(ctx context.Context, from time.Time)
 		query.Set("iss.only", "candles")
 		query.Set("candles.columns", "close,begin")
 		query.Set("interval", "24")
-		query.Set("from", from.Format("2006-01-02"))
-		query.Set("till", till.Format("2006-01-02"))
+		query.Set("from", from.Format(time.DateOnly))
+		query.Set("till", till.Format(time.DateOnly))
 		query.Set("start", strconv.Itoa(start))
 		requestURL.RawQuery = query.Encode()
 
@@ -166,11 +168,11 @@ func (p *Provider) FetchFundUnitDailyPrices(ctx context.Context, from time.Time)
 			}
 
 			begin, okBegin := stringValue(row["begin"])
-			if !okBegin || len(begin) < len("2006-01-02") {
+			if !okBegin || len(begin) < len(time.DateOnly) {
 				return nil, fmt.Errorf("MOEX fund unit daily candle has invalid begin value")
 			}
 
-			priceDate, errDate := time.Parse("2006-01-02", begin[:10])
+			priceDate, errDate := time.Parse(time.DateOnly, begin[:len(time.DateOnly)])
 			if errDate != nil {
 				return nil, fmt.Errorf("parse MOEX fund unit daily candle date %q: %w", begin, errDate)
 			}
@@ -190,23 +192,23 @@ func (p *Provider) FetchFundUnitDailyPrices(ctx context.Context, from time.Time)
 
 func (p *Provider) previousMoscowDate() time.Time {
 	now := p.now().In(moscowLocation)
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	today := dateonly.UTC(now)
 	return today.AddDate(0, 0, -1)
 }
 
 func normalizeDailyPrices(items []prices.SourceDailyPrice) ([]prices.SourceDailyPrice, error) {
-	sort.Slice(items, func(left int, right int) bool {
-		return items[left].PriceDate.Before(items[right].PriceDate)
+	slices.SortFunc(items, func(left, right prices.SourceDailyPrice) int {
+		return left.PriceDate.Compare(right.PriceDate)
 	})
 
 	result := make([]prices.SourceDailyPrice, 0, len(items))
 	for _, item := range items {
-		item.PriceDate = calendarDateUTC(item.PriceDate)
+		item.PriceDate = dateonly.UTC(item.PriceDate)
 
 		if len(result) != 0 && result[len(result)-1].PriceDate.Equal(item.PriceDate) {
 			previous := result[len(result)-1]
 			if previous.UnitValue != item.UnitValue || previous.Currency != item.Currency {
-				return nil, fmt.Errorf("MOEX returned conflicting daily candles for %s", item.PriceDate.Format("2006-01-02"))
+				return nil, fmt.Errorf("MOEX returned conflicting daily candles for %s", item.PriceDate.Format(time.DateOnly))
 			}
 			continue
 		}
@@ -217,15 +219,8 @@ func normalizeDailyPrices(items []prices.SourceDailyPrice) ([]prices.SourceDaily
 	return result, nil
 }
 
-func calendarDateUTC(value time.Time) time.Time {
-	if value.IsZero() {
-		return time.Time{}
-	}
-	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
-}
-
 func (p *Provider) resolvePrimaryBoard(ctx context.Context, force bool) (board, error) {
-	date := p.now().In(moscowLocation).Format("2006-01-02")
+	date := p.now().In(moscowLocation).Format(time.DateOnly)
 
 	p.boardMu.Lock()
 	if !force && p.board.ID != "" && p.boardDate == date {
@@ -280,12 +275,12 @@ func (p *Provider) fetchPrimaryBoard(ctx context.Context) (board, error) {
 
 		boardID, okBoard := stringValue(row["boardid"])
 		currencyText, okCurrency := stringValue(row["currencyid"])
-		currency, okNormalizedCurrency := normalizeCurrency(currencyText)
+		normalized, okNormalizedCurrency := normalizeCurrency(currencyText)
 		if !okBoard || !okCurrency || !okNormalizedCurrency {
 			continue
 		}
 
-		candidate := board{ID: boardID, Currency: currency}
+		candidate := board{ID: boardID, Currency: normalized}
 		if primary != nil && *primary != candidate {
 			return board{}, fmt.Errorf("MOEX returned more than one traded primary board for %s", prices.FundUnitISIN)
 		}
@@ -384,7 +379,7 @@ func currentQuote(block issBlock, currency string) (*prices.SourceQuote, bool) {
 		return nil, false
 	}
 
-	pricedAt, err := time.ParseInLocation("2006-01-02 15:04:05", tradeDate+" "+updateTime, moscowLocation)
+	pricedAt, err := time.ParseInLocation(time.DateTime, tradeDate+" "+updateTime, moscowLocation)
 	if err != nil {
 		return nil, false
 	}
@@ -413,7 +408,7 @@ func previousQuote(block issBlock, currency string) (*prices.SourceQuote, bool) 
 		return nil, false
 	}
 
-	pricedAt, err := time.ParseInLocation("2006-01-02", previousDate, moscowLocation)
+	pricedAt, err := time.ParseInLocation(time.DateOnly, previousDate, moscowLocation)
 	if err != nil {
 		return nil, false
 	}
@@ -482,37 +477,17 @@ func positiveDecimal(value any) (string, bool) {
 		return "", false
 	}
 
-	text = strings.TrimSpace(text)
-	if text == "" {
+	canonical, err := decimal.Canonical(text)
+	if err != nil {
 		return "", false
 	}
 
-	number, ok := new(big.Rat).SetString(text)
+	number, ok := decimal.Parse(canonical)
 	if !ok || number.Sign() <= 0 {
 		return "", false
 	}
 
-	return canonicalDecimal(text), true
-}
-
-func canonicalDecimal(value string) string {
-	text := strings.TrimSpace(value)
-	text = strings.TrimPrefix(text, "+")
-
-	parts := strings.Split(text, ".")
-	if len(parts) != 2 {
-		return text
-	}
-
-	integer := strings.TrimLeft(parts[0], "0")
-	if integer == "" {
-		integer = "0"
-	}
-	fraction := strings.TrimRight(parts[1], "0")
-	if fraction == "" {
-		return integer
-	}
-	return integer + "." + fraction
+	return canonical, true
 }
 
 func stringValue(value any) (string, bool) {
@@ -522,17 +497,12 @@ func stringValue(value any) (string, bool) {
 }
 
 func normalizeCurrency(value string) (string, bool) {
-	currency := strings.ToUpper(strings.TrimSpace(value))
-	if currency == "SUR" {
-		currency = "RUB"
+	code := strings.ToUpper(strings.TrimSpace(value))
+	if code == "SUR" {
+		code = "RUB"
 	}
-	if len(currency) != 3 {
+	if !currency.ValidCode(code) {
 		return "", false
 	}
-	for _, char := range currency {
-		if char < 'A' || char > 'Z' {
-			return "", false
-		}
-	}
-	return currency, true
+	return code, true
 }

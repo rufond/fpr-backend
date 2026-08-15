@@ -3,12 +3,14 @@ package prices
 import (
 	"context"
 	"fmt"
-	"math/big"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
+	"github.com/rufond/fpr-backend/internal/currency"
+	"github.com/rufond/fpr-backend/internal/dateonly"
+	"github.com/rufond/fpr-backend/internal/decimal"
 )
 
 var fundUnitHistoryStartDate = time.Date(2020, time.February, 5, 0, 0, 0, 0, time.UTC)
@@ -65,8 +67,7 @@ func (s *Service) Start(ctx context.Context) error {
 			return nil, fmt.Errorf("application state is not initialized")
 		}
 
-		next := &appstate.State{}
-		*next = *current
+		next := new(*current)
 		next.Prices = priceState
 		return next, nil
 	})
@@ -121,8 +122,7 @@ func (s *Service) SyncFundUnitMOEX(ctx context.Context) (*SyncResult, error) {
 			priceState.DailyPrices = current.Prices.DailyPrices
 		}
 
-		next := &appstate.State{}
-		*next = *current
+		next := new(*current)
 		next.Prices = priceState
 		return next, nil
 	})
@@ -185,8 +185,7 @@ func (s *Service) SyncFundUnitMOEXHistory(ctx context.Context) (*DailySyncResult
 			return nil, fmt.Errorf("MOEX daily price update returned no price state")
 		}
 
-		next := &appstate.State{}
-		*next = *currentState
+		next := new(*currentState)
 		next.Prices = priceState
 		return next, nil
 	})
@@ -207,7 +206,7 @@ func fundUnitMOEXHistoryFrom(state *appstate.PriceState) time.Time {
 			}
 
 			for _, item := range series.Items {
-				priceDate := dateUTC(item.PriceDate)
+				priceDate := dateonly.UTC(item.PriceDate)
 				if priceDate.After(latest) {
 					latest = priceDate
 				}
@@ -231,45 +230,45 @@ func normalizeFundUnitMOEXDailyPrices(items []SourceDailyPrice) ([]SourceDailyPr
 	seen := make(map[string]struct{}, len(items))
 
 	for _, item := range items {
-		item.PriceDate = dateUTC(item.PriceDate)
+		item.PriceDate = dateonly.UTC(item.PriceDate)
 		if item.PriceDate.IsZero() {
 			return nil, fmt.Errorf("MOEX fund unit daily price has zero price date")
 		}
 
-		value, ok := new(big.Rat).SetString(strings.TrimSpace(item.UnitValue))
+		value, ok := decimal.Parse(item.UnitValue)
 		if !ok || value.Sign() <= 0 {
 			return nil, fmt.Errorf("MOEX fund unit daily price has invalid unit value %q", item.UnitValue)
 		}
 
-		currency := strings.TrimSpace(item.Currency)
-		if !validCurrency(currency) {
+		currencyCode := strings.TrimSpace(item.Currency)
+		if !currency.ValidCode(currencyCode) {
 			return nil, fmt.Errorf("MOEX fund unit daily price has invalid currency %q", item.Currency)
 		}
 
-		key := item.PriceDate.Format("2006-01-02")
+		key := item.PriceDate.Format(time.DateOnly)
 		if _, exists := seen[key]; exists {
 			return nil, fmt.Errorf("MOEX fund unit daily prices contain duplicate date %s", key)
 		}
 		seen[key] = struct{}{}
 
 		item.UnitValue = strings.TrimSpace(item.UnitValue)
-		item.Currency = currency
+		item.Currency = currencyCode
 		result = append(result, item)
 	}
 
-	sort.Slice(result, func(left int, right int) bool {
-		return result[left].PriceDate.Before(result[right].PriceDate)
+	slices.SortFunc(result, func(left, right SourceDailyPrice) int {
+		return left.PriceDate.Compare(right.PriceDate)
 	})
 
 	return result, nil
 }
 
 func validateFundUnitMOEXQuote(quote SourceQuote) error {
-	value, ok := new(big.Rat).SetString(strings.TrimSpace(quote.UnitValue))
+	value, ok := decimal.Parse(quote.UnitValue)
 	if !ok || value.Sign() <= 0 {
 		return fmt.Errorf("MOEX fund unit quote has invalid unit value %q", quote.UnitValue)
 	}
-	if !validCurrency(strings.TrimSpace(quote.Currency)) {
+	if !currency.ValidCode(strings.TrimSpace(quote.Currency)) {
 		return fmt.Errorf("MOEX fund unit quote has invalid currency %q", quote.Currency)
 	}
 	if quote.PricedAt.IsZero() {
@@ -280,23 +279,4 @@ func validateFundUnitMOEXQuote(quote SourceQuote) error {
 	}
 
 	return nil
-}
-
-func validCurrency(currency string) bool {
-	if len(currency) != 3 {
-		return false
-	}
-	for _, char := range currency {
-		if char < 'A' || char > 'Z' {
-			return false
-		}
-	}
-	return true
-}
-
-func dateUTC(value time.Time) time.Time {
-	if value.IsZero() {
-		return time.Time{}
-	}
-	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
 }

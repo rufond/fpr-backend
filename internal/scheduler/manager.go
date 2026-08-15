@@ -154,13 +154,11 @@ func (m *Manager) Jobs() []JobInfo {
 
 		if entry, ok := entryByID[job.id]; ok {
 			if !entry.Prev.IsZero() {
-				prev := entry.Prev.UTC()
-				info.Prev = &prev
+				info.Prev = new(entry.Prev.UTC())
 			}
 
 			if !entry.Next.IsZero() {
-				next := entry.Next.UTC()
-				info.Next = &next
+				info.Next = new(entry.Next.UTC())
 			}
 		}
 

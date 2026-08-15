@@ -3,12 +3,14 @@ package fund
 import (
 	"fmt"
 	"math/big"
-	"strings"
 	"time"
 
 	govalidate "github.com/xloss/go-validate"
 	"github.com/xloss/go-validate/rules"
 
+	"github.com/rufond/fpr-backend/internal/currency"
+	"github.com/rufond/fpr-backend/internal/dateonly"
+	"github.com/rufond/fpr-backend/internal/decimal"
 	"github.com/rufond/fpr-backend/internal/validationrules"
 )
 
@@ -71,11 +73,11 @@ func ValidateSourcePage(page *SourcePage) error {
 	}
 
 	latest := page.History[len(page.History)-1]
-	if !sameCalendarDate(latest.AsOfDate, page.Snapshot.AsOfDate) {
+	if !dateonly.Equal(latest.AsOfDate, page.Snapshot.AsOfDate) {
 		return fmt.Errorf("latest history date differs from snapshot date")
 	}
-	if !decimalEqual(latest.CalculatedUnitValueUSD, page.Snapshot.CalculatedUnitValueUSD) ||
-		!decimalEqual(latest.NAVUSD, page.Snapshot.NAVUSD) {
+	if !decimal.Equal(latest.CalculatedUnitValueUSD, page.Snapshot.CalculatedUnitValueUSD) ||
+		!decimal.Equal(latest.NAVUSD, page.Snapshot.NAVUSD) {
 		return fmt.Errorf("latest history values differ from snapshot values")
 	}
 
@@ -173,7 +175,7 @@ func validateAsset(asset SourceAsset) error {
 	if err := validateShare(asset.AssetSharePercent); err != nil {
 		return err
 	}
-	if asset.Currency != "" && !validCurrencyCode(asset.Currency) {
+	if asset.Currency != "" && !currency.ValidCode(asset.Currency) {
 		return fmt.Errorf("invalid currency %q", asset.Currency)
 	}
 
@@ -181,7 +183,7 @@ func validateAsset(asset SourceAsset) error {
 		return nil
 	}
 
-	quantity, ok := decimalRat(asset.Quantity)
+	quantity, ok := decimal.Parse(asset.Quantity)
 	if !ok || quantity.Sign() < 0 {
 		return fmt.Errorf("security %s has invalid quantity %q", asset.ISIN, asset.Quantity)
 	}
@@ -241,7 +243,7 @@ func validateWithGoValidate[T any](scope string, data map[string]any, fieldRules
 }
 
 func validateShare(raw string) error {
-	value, ok := decimalRat(raw)
+	value, ok := decimal.Parse(raw)
 	if !ok {
 		return fmt.Errorf("invalid asset share %q", raw)
 	}
@@ -252,39 +254,9 @@ func validateShare(raw string) error {
 }
 
 func validatePositiveDecimal(raw string, name string) error {
-	value, ok := decimalRat(raw)
+	value, ok := decimal.Parse(raw)
 	if !ok || value.Sign() <= 0 {
 		return fmt.Errorf("%s must be positive, got %q", name, raw)
 	}
 	return nil
-}
-
-func decimalEqual(left string, right string) bool {
-	leftValue, leftOK := decimalRat(left)
-	rightValue, rightOK := decimalRat(right)
-	return leftOK && rightOK && leftValue.Cmp(rightValue) == 0
-}
-
-func decimalRat(raw string) (*big.Rat, bool) {
-	text := strings.TrimSpace(raw)
-	text = strings.ReplaceAll(text, "\u00a0", "")
-	text = strings.ReplaceAll(text, " ", "")
-	text = strings.ReplaceAll(text, ",", ".")
-	return new(big.Rat).SetString(text)
-}
-
-func validCurrencyCode(value string) bool {
-	if len(value) != 3 {
-		return false
-	}
-	for _, char := range value {
-		if char < 'A' || char > 'Z' {
-			return false
-		}
-	}
-	return true
-}
-
-func sameCalendarDate(left time.Time, right time.Time) bool {
-	return left.Year() == right.Year() && left.Month() == right.Month() && left.Day() == right.Day()
 }

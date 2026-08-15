@@ -5,9 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math/big"
-	"sort"
+	"slices"
 	"strings"
+	"time"
+
+	"github.com/rufond/fpr-backend/internal/dateonly"
+	"github.com/rufond/fpr-backend/internal/decimal"
 )
 
 type snapshotHashPayload struct {
@@ -34,17 +37,17 @@ type snapshotHashCategory struct {
 }
 
 func SnapshotSourceHash(snapshot SourceSnapshot) (string, error) {
-	calculatedUnitValue, err := canonicalHashDecimal(snapshot.CalculatedUnitValueUSD)
+	calculatedUnitValue, err := decimal.Canonical(snapshot.CalculatedUnitValueUSD)
 	if err != nil {
 		return "", fmt.Errorf("normalize calculated unit value: %w", err)
 	}
-	nav, err := canonicalHashDecimal(snapshot.NAVUSD)
+	nav, err := decimal.Canonical(snapshot.NAVUSD)
 	if err != nil {
 		return "", fmt.Errorf("normalize NAV: %w", err)
 	}
 
 	payload := snapshotHashPayload{
-		AsOfDate:               dateOnlyUTC(snapshot.AsOfDate).Format("2006-01-02"),
+		AsOfDate:               dateonly.UTC(snapshot.AsOfDate).Format(time.DateOnly),
 		CalculatedUnitValueUSD: calculatedUnitValue,
 		NAVUSD:                 nav,
 		Assets:                 make([]snapshotHashAsset, 0, len(snapshot.Assets)),
@@ -54,13 +57,13 @@ func SnapshotSourceHash(snapshot SourceSnapshot) (string, error) {
 	for index, asset := range snapshot.Assets {
 		quantity := ""
 		if strings.TrimSpace(asset.Quantity) != "" {
-			quantity, err = canonicalHashDecimal(asset.Quantity)
+			quantity, err = decimal.Canonical(asset.Quantity)
 			if err != nil {
 				return "", fmt.Errorf("normalize asset %d quantity: %w", index+1, err)
 			}
 		}
 
-		share, errShare := canonicalHashDecimal(asset.AssetSharePercent)
+		share, errShare := decimal.Canonical(asset.AssetSharePercent)
 		if errShare != nil {
 			return "", fmt.Errorf("normalize asset %d share: %w", index+1, errShare)
 		}
@@ -77,7 +80,7 @@ func SnapshotSourceHash(snapshot SourceSnapshot) (string, error) {
 	}
 
 	for index, category := range snapshot.Categories {
-		share, errShare := canonicalHashDecimal(category.AssetSharePercent)
+		share, errShare := decimal.Canonical(category.AssetSharePercent)
 		if errShare != nil {
 			return "", fmt.Errorf("normalize category %d share: %w", index+1, errShare)
 		}
@@ -87,16 +90,14 @@ func SnapshotSourceHash(snapshot SourceSnapshot) (string, error) {
 		})
 	}
 
-	sort.Slice(payload.Assets, func(i, j int) bool {
-		return snapshotHashAssetKey(payload.Assets[i]) < snapshotHashAssetKey(payload.Assets[j])
+	slices.SortFunc(payload.Assets, func(left, right snapshotHashAsset) int {
+		return strings.Compare(snapshotHashAssetKey(left), snapshotHashAssetKey(right))
 	})
-	sort.Slice(payload.Categories, func(i, j int) bool {
-		left := payload.Categories[i]
-		right := payload.Categories[j]
-		if left.SourceName != right.SourceName {
-			return left.SourceName < right.SourceName
+	slices.SortFunc(payload.Categories, func(left, right snapshotHashCategory) int {
+		if byName := strings.Compare(left.SourceName, right.SourceName); byName != 0 {
+			return byName
 		}
-		return left.AssetSharePercent < right.AssetSharePercent
+		return strings.Compare(left.AssetSharePercent, right.AssetSharePercent)
 	})
 
 	encoded, err := json.Marshal(payload)
@@ -118,50 +119,4 @@ func snapshotHashAssetKey(asset snapshotHashAsset) string {
 		asset.AssetSharePercent,
 		fmt.Sprintf("%t", asset.AssetShareUpperBound),
 	}, "\x00")
-}
-
-func canonicalHashDecimal(raw string) (string, error) {
-	text := strings.TrimSpace(raw)
-	text = strings.ReplaceAll(text, "\u00a0", "")
-	text = strings.ReplaceAll(text, " ", "")
-	text = strings.ReplaceAll(text, ",", ".")
-	if text == "" {
-		return "", fmt.Errorf("decimal is empty")
-	}
-
-	if _, ok := new(big.Rat).SetString(text); !ok {
-		return "", fmt.Errorf("invalid decimal %q", raw)
-	}
-
-	sign := ""
-	if after, ok := strings.CutPrefix(text, "+"); ok {
-		text = after
-	} else if strings.HasPrefix(text, "-") {
-		sign = "-"
-		text = strings.TrimPrefix(text, "-")
-	}
-
-	parts := strings.Split(text, ".")
-	if len(parts) > 2 {
-		return "", fmt.Errorf("invalid decimal %q", raw)
-	}
-
-	integer := strings.TrimLeft(parts[0], "0")
-	if integer == "" {
-		integer = "0"
-	}
-
-	fraction := ""
-	if len(parts) == 2 {
-		fraction = strings.TrimRight(parts[1], "0")
-	}
-
-	if integer == "0" && fraction == "" {
-		return "0", nil
-	}
-	if fraction == "" {
-		return sign + integer, nil
-	}
-
-	return sign + integer + "." + fraction, nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +11,8 @@ import (
 	"github.com/xloss/go-builder"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
+	"github.com/rufond/fpr-backend/internal/dateonly"
+	"github.com/rufond/fpr-backend/internal/decimal"
 )
 
 const pricePointRetention = 48 * time.Hour
@@ -140,7 +141,7 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 	}
 
 	if stored != nil &&
-		decimalEqual(stored.UnitValue, quote.UnitValue) &&
+		decimal.Equal(stored.UnitValue, quote.UnitValue) &&
 		stored.Currency == quote.Currency &&
 		stored.PricedAt.Equal(quote.PricedAt) {
 		price, errPrice := loadInstrumentPrice(ctx, tx, priceSourceID)
@@ -202,16 +203,16 @@ func (r *Repository) ApplyFundUnitMOEXDailyPrices(
 
 	byDate := make(map[string]storedDailyPrice, len(stored))
 	for _, item := range stored {
-		item.PriceDate = dateUTC(item.PriceDate)
-		byDate[item.PriceDate.Format("2006-01-02")] = item
+		item.PriceDate = dateonly.UTC(item.PriceDate)
+		byDate[item.PriceDate.Format(time.DateOnly)] = item
 	}
 
 	inserted := 0
 	updated := 0
 
 	for _, item := range items {
-		priceDate := dateUTC(item.PriceDate)
-		key := priceDate.Format("2006-01-02")
+		priceDate := dateonly.UTC(item.PriceDate)
+		key := priceDate.Format(time.DateOnly)
 		previous, exists := byDate[key]
 
 		if !exists {
@@ -222,7 +223,7 @@ func (r *Repository) ApplyFundUnitMOEXDailyPrices(
 			continue
 		}
 
-		if decimalEqual(previous.UnitValue, item.UnitValue) && previous.Currency == item.Currency {
+		if decimal.Equal(previous.UnitValue, item.UnitValue) && previous.Currency == item.Currency {
 			continue
 		}
 
@@ -536,7 +537,7 @@ func loadDailyPrices(ctx context.Context, db priceQueryer, priceSourceID int64) 
 	}
 
 	for index := range items {
-		items[index].PriceDate = dateUTC(items[index].PriceDate)
+		items[index].PriceDate = dateonly.UTC(items[index].PriceDate)
 	}
 
 	return items, nil
@@ -546,7 +547,7 @@ func insertDailyPrice(ctx context.Context, tx pgx.Tx, priceSourceID int64, item 
 	table := builder.NewTable("instrument_daily_prices")
 	query := builder.NewInsert(table)
 	query.Value("price_source_id", priceSourceID)
-	query.Value("price_date", dateUTC(item.PriceDate))
+	query.Value("price_date", dateonly.UTC(item.PriceDate))
 	query.Value("unit_value", item.UnitValue)
 	query.Value("currency", item.Currency)
 
@@ -569,7 +570,7 @@ func updateDailyPrice(ctx context.Context, tx pgx.Tx, priceSourceID int64, item 
 	query.SetNow("updated_at")
 	query.Where(builder.WhereAnd{List: []builder.Where{
 		builder.WhereEq{Table: table, Column: "price_source_id", Value: priceSourceID},
-		builder.WhereEq{Table: table, Column: "price_date", Value: dateUTC(item.PriceDate)},
+		builder.WhereEq{Table: table, Column: "price_date", Value: dateonly.UTC(item.PriceDate)},
 	}})
 
 	sql, binds, errBuild := query.Get()
@@ -718,7 +719,7 @@ func loadDailyPriceState(ctx context.Context, db priceQueryer, state *appstate.P
 		}
 
 		series.Items = append(series.Items, appstate.InstrumentDailyPrice{
-			PriceDate: dateUTC(item.PriceDate),
+			PriceDate: dateonly.UTC(item.PriceDate),
 			UnitValue: item.UnitValue,
 			Currency:  item.Currency,
 		})
@@ -786,10 +787,4 @@ func instrumentPrice(item storedPriceState) appstate.InstrumentPrice {
 		PricedAt:       item.PricedAt.UTC(),
 		FetchedAt:      item.FetchedAt.UTC(),
 	}
-}
-
-func decimalEqual(left string, right string) bool {
-	leftValue, leftOK := new(big.Rat).SetString(left)
-	rightValue, rightOK := new(big.Rat).SetString(right)
-	return leftOK && rightOK && leftValue.Cmp(rightValue) == 0
 }

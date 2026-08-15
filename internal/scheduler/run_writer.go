@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 )
@@ -71,26 +72,22 @@ func cleanRunMessage(message map[string]any) map[string]any {
 		case "scheduler_job", "scheduler_run_id", "caller":
 			continue
 		case "time":
-			result[key] = cleanRunMessageTime(value)
+			switch timestamp := value.(type) {
+			case float64:
+				result[key] = time.UnixMilli(int64(timestamp)).UTC().Format(time.RFC3339Nano)
+			case int64:
+				result[key] = time.UnixMilli(timestamp).UTC().Format(time.RFC3339Nano)
+			case int:
+				result[key] = time.UnixMilli(int64(timestamp)).UTC().Format(time.RFC3339Nano)
+			default:
+				result[key] = value
+			}
 		default:
 			result[key] = value
 		}
 	}
 
 	return result
-}
-
-func cleanRunMessageTime(value any) any {
-	switch v := value.(type) {
-	case float64:
-		return time.UnixMilli(int64(v)).UTC().Format(time.RFC3339Nano)
-	case int64:
-		return time.UnixMilli(v).UTC().Format(time.RFC3339Nano)
-	case int:
-		return time.UnixMilli(int64(v)).UTC().Format(time.RFC3339Nano)
-	default:
-		return value
-	}
 }
 
 func (w *RunWriter) Messages() []map[string]any {
@@ -109,10 +106,7 @@ func (w *RunWriter) Flush() error {
 }
 
 func (w *RunWriter) copyMessagesLocked() []map[string]any {
-	result := make([]map[string]any, len(w.messages))
-	copy(result, w.messages)
-
-	return result
+	return slices.Clone(w.messages)
 }
 
 func panicToError(value any) error {

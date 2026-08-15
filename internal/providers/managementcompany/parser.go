@@ -3,13 +3,14 @@ package managementcompany
 import (
 	"fmt"
 	"html"
-	"math/big"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/rufond/fpr-backend/internal/dateonly"
+	"github.com/rufond/fpr-backend/internal/decimal"
 	"github.com/rufond/fpr-backend/internal/fund"
 )
 
@@ -45,11 +46,11 @@ func ParsePage(body []byte) (*fund.SourcePage, error) {
 	}
 
 	latest := history[len(history)-1]
-	if !sameDate(latest.AsOfDate, snapshot.AsOfDate) {
+	if !dateonly.Equal(latest.AsOfDate, snapshot.AsOfDate) {
 		return nil, fmt.Errorf(
 			"parse management company page: current snapshot date %s differs from latest history date %s",
-			snapshot.AsOfDate.Format("2006-01-02"),
-			latest.AsOfDate.Format("2006-01-02"),
+			snapshot.AsOfDate.Format(time.DateOnly),
+			latest.AsOfDate.Format(time.DateOnly),
 		)
 	}
 	if latest.CalculatedUnitValueUSD != snapshot.CalculatedUnitValueUSD || latest.NAVUSD != snapshot.NAVUSD {
@@ -69,11 +70,11 @@ func ParseSnapshot(body []byte) (*fund.SourceSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !sameDate(calculatedUnitValueDate, navDate) {
+	if !dateonly.Equal(calculatedUnitValueDate, navDate) {
 		return nil, fmt.Errorf(
 			"parse management company snapshot: calculated unit value date %s differs from NAV date %s",
-			calculatedUnitValueDate.Format("2006-01-02"),
-			navDate.Format("2006-01-02"),
+			calculatedUnitValueDate.Format(time.DateOnly),
+			navDate.Format(time.DateOnly),
 		)
 	}
 
@@ -91,11 +92,11 @@ func ParseSnapshot(body []byte) (*fund.SourceSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !sameDate(calculatedUnitValueDate, compositionDate) {
+	if !dateonly.Equal(calculatedUnitValueDate, compositionDate) {
 		return nil, fmt.Errorf(
 			"parse management company snapshot: value date %s differs from composition date %s",
-			calculatedUnitValueDate.Format("2006-01-02"),
-			compositionDate.Format("2006-01-02"),
+			calculatedUnitValueDate.Format(time.DateOnly),
+			compositionDate.Format(time.DateOnly),
 		)
 	}
 
@@ -154,11 +155,13 @@ func ParseHistory(body []byte) ([]fund.DailyValue, error) {
 		}
 	}
 
-	sort.Slice(dates, func(i, j int) bool { return dates[i].Before(dates[j]) })
+	slices.SortFunc(dates, func(left, right time.Time) int {
+		return left.Compare(right)
+	})
 
 	result := make([]fund.DailyValue, 0, len(dates))
 	for _, date := range dates {
-		key := date.Format("2006-01-02")
+		key := date.Format(time.DateOnly)
 		result = append(result, fund.DailyValue{
 			AsOfDate:               date,
 			CalculatedUnitValueUSD: calculatedUnitValues[key].Value,
@@ -280,7 +283,7 @@ func parseAssets(section string) ([]fund.SourceAsset, error) {
 		quantityText := cleanText(match[3])
 		quantity := ""
 		if quantityText != "" {
-			quantity, err = canonicalDecimal(quantityText)
+			quantity, err = decimal.Canonical(quantityText)
 			if err != nil {
 				return nil, fmt.Errorf("parse management company snapshot asset row %d quantity: %w", index+1, err)
 			}
@@ -373,7 +376,7 @@ func parseCategories(section string) ([]fund.SourceCategory, error) {
 		name := strings.ReplaceAll(match[1], `\'`, `'`)
 		name = strings.ReplaceAll(name, `\\`, `\`)
 		name = strings.TrimSpace(html.UnescapeString(name))
-		share, err := canonicalDecimal(match[2])
+		share, err := decimal.Canonical(match[2])
 		if err != nil {
 			return nil, fmt.Errorf("parse management company snapshot category %d share: %w", index+1, err)
 		}
@@ -421,12 +424,12 @@ func parseHistorySeries(source string, blockRE *regexp.Regexp, name string) (map
 			return nil, fmt.Errorf("parse management company history: %s point %d has invalid date", name, index+1)
 		}
 
-		value, err := canonicalDecimal(match[4])
+		value, err := decimal.Canonical(match[4])
 		if err != nil {
 			return nil, fmt.Errorf("parse management company history: %s point %d value: %w", name, index+1, err)
 		}
 
-		key := date.Format("2006-01-02")
+		key := date.Format(time.DateOnly)
 		if _, exists := result[key]; exists {
 			return nil, fmt.Errorf("parse management company history: %s has duplicate date %s", name, key)
 		}
@@ -444,7 +447,7 @@ func parseUSDValue(raw string) (string, error) {
 	}
 
 	text = strings.TrimSpace(text[:len(text)-len("USD")])
-	return canonicalDecimal(text)
+	return decimal.Canonical(text)
 }
 
 func parseAssetShare(raw string) (string, bool, error) {
@@ -457,14 +460,13 @@ func parseAssetShare(raw string) (string, bool, error) {
 	switch {
 	case strings.HasPrefix(lower, "менее"):
 		upperBound = true
-		runes := []rune(text)
-		text = strings.TrimSpace(string(runes[len([]rune("менее")):]))
+		text = strings.TrimSpace(strings.TrimPrefix(lower, "менее"))
 	case strings.HasPrefix(text, "<"):
 		upperBound = true
 		text = strings.TrimSpace(strings.TrimPrefix(text, "<"))
 	}
 
-	value, err := canonicalDecimal(text)
+	value, err := decimal.Canonical(text)
 	if err != nil {
 		return "", false, err
 	}
@@ -488,52 +490,6 @@ func parseRussianDate(raw string) (time.Time, error) {
 	return time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC), nil
 }
 
-func canonicalDecimal(raw string) (string, error) {
-	text := strings.TrimSpace(raw)
-	text = strings.ReplaceAll(text, "\u00a0", "")
-	text = strings.ReplaceAll(text, " ", "")
-	text = strings.ReplaceAll(text, ",", ".")
-	if text == "" {
-		return "", fmt.Errorf("decimal is empty")
-	}
-
-	if _, ok := new(big.Rat).SetString(text); !ok {
-		return "", fmt.Errorf("invalid decimal %q", raw)
-	}
-
-	sign := ""
-	if after, ok := strings.CutPrefix(text, "+"); ok {
-		text = after
-	} else if strings.HasPrefix(text, "-") {
-		sign = "-"
-		text = strings.TrimPrefix(text, "-")
-	}
-
-	parts := strings.Split(text, ".")
-	if len(parts) > 2 {
-		return "", fmt.Errorf("invalid decimal %q", raw)
-	}
-
-	integer := strings.TrimLeft(parts[0], "0")
-	if integer == "" {
-		integer = "0"
-	}
-
-	fraction := ""
-	if len(parts) == 2 {
-		fraction = strings.TrimRight(parts[1], "0")
-	}
-
-	if integer == "0" && fraction == "" {
-		sign = ""
-	}
-	if fraction == "" {
-		return sign + integer, nil
-	}
-
-	return sign + integer + "." + fraction, nil
-}
-
 func cleanText(raw string) string {
 	text := tagRE.ReplaceAllString(raw, " ")
 	text = html.UnescapeString(text)
@@ -546,8 +502,4 @@ func cleanText(raw string) string {
 		}
 	}, text)
 	return strings.Join(strings.Fields(text), " ")
-}
-
-func sameDate(a, b time.Time) bool {
-	return a.Year() == b.Year() && a.Month() == b.Month() && a.Day() == b.Day()
 }

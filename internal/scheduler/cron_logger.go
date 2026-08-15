@@ -30,16 +30,13 @@ func cronFields(keysAndValues ...any) map[string]any {
 			continue
 		}
 
-		fields[key] = cronFieldValue(keysAndValues[i+1])
+		value := keysAndValues[i+1]
+		if timestamp, ok := value.(time.Time); ok {
+			value = timestamp.UTC().Format(time.RFC3339Nano)
+		}
+
+		fields[key] = value
 	}
 
 	return fields
-}
-
-func cronFieldValue(value any) any {
-	if t, ok := value.(time.Time); ok {
-		return t.UTC().Format(time.RFC3339Nano)
-	}
-
-	return value
 }

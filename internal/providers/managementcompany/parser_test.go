@@ -104,27 +104,6 @@ func TestParseHistoryRejectsDifferentDateSets(t *testing.T) {
 	}
 }
 
-func TestCanonicalDecimal(t *testing.T) {
-	t.Parallel()
-
-	tests := map[string]string{
-		"492 986 650.00": "492986650",
-		"00031.1800":     "31.18",
-		"0.0100":         "0.01",
-		"-0.000":         "0",
-		"1,2500":         "1.25",
-	}
-	for input, want := range tests {
-		got, err := canonicalDecimal(input)
-		if err != nil {
-			t.Fatalf("canonicalDecimal(%q) error = %v", input, err)
-		}
-		if got != want {
-			t.Fatalf("canonicalDecimal(%q) = %q, want %q", input, got, want)
-		}
-	}
-}
-
 func readFixture(t *testing.T) []byte {
 	t.Helper()
 

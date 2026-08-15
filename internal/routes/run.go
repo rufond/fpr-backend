@@ -39,11 +39,11 @@ func Run(ctx context.Context, addr string, routes []Route, httpRoutes []HTTPRout
 	mux := http.NewServeMux()
 
 	for _, route := range httpRoutes {
-		mux.Handle(httpRoutePattern(route), route.Handler)
+		mux.Handle(routePattern(route.Method, route.Path), route.Handler)
 	}
 
 	for _, route := range routes {
-		mux.HandleFunc(routePattern(route), func(writer http.ResponseWriter, request *http.Request) {
+		mux.HandleFunc(routePattern(route.Method, route.Path), func(writer http.ResponseWriter, request *http.Request) {
 			start := time.Now()
 
 			var (
@@ -154,10 +154,8 @@ func Run(ctx context.Context, addr string, routes []Route, httpRoutes []HTTPRout
 func GetRealIP(request *http.Request) string {
 	ip := request.Header.Get("X-Forwarded-For")
 	if ip != "" {
-		list := strings.Split(ip, ",")
-		if len(list) > 0 {
-			return strings.TrimSpace(list[0])
-		}
+		first, _, _ := strings.Cut(ip, ",")
+		return strings.TrimSpace(first)
 	}
 
 	address, _, err := net.SplitHostPort(request.RemoteAddr)
@@ -168,18 +166,10 @@ func GetRealIP(request *http.Request) string {
 	return strings.TrimSpace(request.RemoteAddr)
 }
 
-func routePattern(route Route) string {
-	if route.Method == "" {
-		return route.Path
+func routePattern(method string, path string) string {
+	if method == "" {
+		return path
 	}
 
-	return route.Method + " " + route.Path
-}
-
-func httpRoutePattern(route HTTPRoute) string {
-	if route.Method == "" {
-		return route.Path
-	}
-
-	return route.Method + " " + route.Path
+	return method + " " + path
 }

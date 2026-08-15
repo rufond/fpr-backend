@@ -11,6 +11,7 @@ import (
 	"github.com/xloss/go-builder"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
+	"github.com/rufond/fpr-backend/internal/dateonly"
 )
 
 var ErrFundStateNotFound = errors.New("fund state not found")
@@ -190,7 +191,7 @@ func loadFundState(ctx context.Context, db queryer) (*appstate.FundState, error)
 	state := &appstate.FundState{
 		Snapshot: appstate.FundSnapshot{
 			ID:                     snapshot.ID,
-			AsOfDate:               dateOnlyUTC(snapshot.AsOfDate),
+			AsOfDate:               dateonly.UTC(snapshot.AsOfDate),
 			ObservedAt:             snapshot.ObservedAt.UTC(),
 			SourceHash:             snapshot.SourceHash,
 			CalculatedUnitValueUSD: snapshot.CalculatedUnitValueUSD,
@@ -240,7 +241,7 @@ func loadDailyValues(ctx context.Context, db queryer) ([]StoredDailyValue, error
 	}
 
 	for index := range items {
-		items[index].AsOfDate = dateOnlyUTC(items[index].AsOfDate)
+		items[index].AsOfDate = dateonly.UTC(items[index].AsOfDate)
 	}
 
 	return items, nil
@@ -397,7 +398,7 @@ func applyDailyValueChanges(ctx context.Context, tx pgx.Tx, changes DailyValueCh
 
 	for _, item := range changes.Insert {
 		query := builder.NewInsert(table)
-		query.Value("as_of_date", dateOnlyUTC(item.AsOfDate))
+		query.Value("as_of_date", dateonly.UTC(item.AsOfDate))
 		query.Value("calculated_unit_value_usd", item.CalculatedUnitValueUSD)
 		query.Value("nav_usd", item.NAVUSD)
 
@@ -415,7 +416,7 @@ func applyDailyValueChanges(ctx context.Context, tx pgx.Tx, changes DailyValueCh
 		query.Set("calculated_unit_value_usd", item.CalculatedUnitValueUSD)
 		query.Set("nav_usd", item.NAVUSD)
 		query.SetNow("updated_at")
-		query.Where(builder.WhereEq{Table: table, Column: "as_of_date", Value: dateOnlyUTC(item.AsOfDate)})
+		query.Where(builder.WhereEq{Table: table, Column: "as_of_date", Value: dateonly.UTC(item.AsOfDate)})
 
 		sql, binds, errBuild := query.Get()
 		if errBuild != nil {
@@ -442,7 +443,7 @@ func insertSnapshot(
 ) (int64, bool, error) {
 	table := builder.NewTable("fund_snapshots")
 	query := builder.NewInsert(table)
-	query.Value("as_of_date", dateOnlyUTC(snapshot.AsOfDate))
+	query.Value("as_of_date", dateonly.UTC(snapshot.AsOfDate))
 	query.Value("observed_at", observedAt.UTC())
 	query.Value("source_hash", sourceHash)
 	query.Value("calculated_unit_value_usd", snapshot.CalculatedUnitValueUSD)
@@ -604,8 +605,4 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
-}
-
-func dateOnlyUTC(value time.Time) time.Time {
-	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
 }

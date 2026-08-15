@@ -2,6 +2,7 @@ package schedulerjobs
 
 import (
 	"context"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -29,7 +30,7 @@ func ManagementCompanySync(service managementCompanySyncService, publisher realt
 
 		for _, conflict := range result.HistoryConflicts {
 			logger.Warn().
-				Str("date", conflict.AsOfDate.Format("2006-01-02")).
+				Str("date", conflict.AsOfDate.Format(time.DateOnly)).
 				Str("stored_calculated_unit_value_usd", conflict.StoredCalculatedUnitValueUSD).
 				Str("source_calculated_unit_value_usd", conflict.SourceCalculatedUnitValueUSD).
 				Str("stored_nav_usd", conflict.StoredNAVUSD).
@@ -37,7 +38,16 @@ func ManagementCompanySync(service managementCompanySyncService, publisher realt
 				Msg("management company historical value differs from fixed history")
 		}
 
-		publishManagementCompanyChanges(publisher, result)
+		scopes := make([]string, 0, 2)
+		if result.SnapshotCreated {
+			scopes = append(scopes, realtime.ScopeFundState)
+		}
+		if result.HistoryInserted > 0 || result.HistoryUpdated > 0 {
+			scopes = append(scopes, realtime.ScopeFundHistory)
+		}
+		if len(scopes) != 0 {
+			publisher.Publish(realtime.Update{Scopes: scopes})
+		}
 
 		summary := map[string]any{
 			"source_hash":       result.SourceHash,
@@ -59,21 +69,4 @@ func ManagementCompanySync(service managementCompanySyncService, publisher realt
 
 		return scheduler.JobCompleted(summary), nil
 	}
-}
-
-func publishManagementCompanyChanges(publisher realtime.Publisher, result *fund.SyncResult) {
-	scopes := make([]string, 0, 2)
-
-	if result.SnapshotCreated {
-		scopes = append(scopes, realtime.ScopeFundState)
-	}
-	if result.HistoryInserted > 0 || result.HistoryUpdated > 0 {
-		scopes = append(scopes, realtime.ScopeFundHistory)
-	}
-
-	if len(scopes) == 0 {
-		return
-	}
-
-	publisher.Publish(realtime.Update{Scopes: scopes})
 }

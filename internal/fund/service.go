@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
+	"github.com/rufond/fpr-backend/internal/dateonly"
+	"github.com/rufond/fpr-backend/internal/decimal"
 )
 
 const historyCorrectionWindowDays = 7
@@ -146,7 +148,7 @@ func (s *Service) SyncManagementCompany(ctx context.Context) (*SyncResult, error
 
 		next := &appstate.State{}
 		if current != nil {
-			*next = *current
+			next = new(*current)
 		}
 		next.Fund = fundState
 
@@ -167,7 +169,7 @@ func planDailyValueChanges(
 		return DailyValueChanges{}, nil
 	}
 
-	latestSourceDate := dateOnlyUTC(source[len(source)-1].AsOfDate)
+	latestSourceDate := dateonly.UTC(source[len(source)-1].AsOfDate)
 	mutableFrom := latestSourceDate.AddDate(0, 0, -historyCorrectionWindowDays)
 
 	changes := DailyValueChanges{
@@ -177,7 +179,7 @@ func planDailyValueChanges(
 	conflicts := make([]HistoryConflict, 0)
 
 	for _, item := range source {
-		item.AsOfDate = dateOnlyUTC(item.AsOfDate)
+		item.AsOfDate = dateonly.UTC(item.AsOfDate)
 		key := item.AsOfDate.Format(time.DateOnly)
 
 		stored, exists := existing[key]
@@ -186,8 +188,8 @@ func planDailyValueChanges(
 			continue
 		}
 
-		if decimalEqual(stored.CalculatedUnitValueUSD, item.CalculatedUnitValueUSD) &&
-			decimalEqual(stored.NAVUSD, item.NAVUSD) {
+		if decimal.Equal(stored.CalculatedUnitValueUSD, item.CalculatedUnitValueUSD) &&
+			decimal.Equal(stored.NAVUSD, item.NAVUSD) {
 			continue
 		}
 
