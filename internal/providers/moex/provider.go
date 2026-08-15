@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/prices"
+	"github.com/rufond/fpr-backend/internal/providers"
 )
 
 const (
@@ -26,6 +28,16 @@ var moscowLocation = time.FixedZone("MSK", 3*60*60)
 type Provider struct {
 	baseURL string
 	client  *http.Client
+	now     func() time.Time
+
+	boardMu   sync.Mutex
+	board     board
+	boardDate string
+}
+
+type board struct {
+	ID       string
+	Currency string
 }
 
 type issBlock struct {
@@ -33,7 +45,11 @@ type issBlock struct {
 	Data    [][]any  `json:"data"`
 }
 
-type issResponse struct {
+type issSecurityResponse struct {
+	Boards issBlock `json:"boards"`
+}
+
+type issQuoteResponse struct {
 	MarketData issBlock `json:"marketdata"`
 	Securities issBlock `json:"securities"`
 }
@@ -49,13 +65,121 @@ func NewProvider(baseURL string, client *http.Client) *Provider {
 	return &Provider{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		client:  client,
+		now:     time.Now,
 	}
 }
 
 func (p *Provider) FetchFundUnitQuote(ctx context.Context) (*prices.SourceQuote, error) {
-	requestURL, errURL := url.Parse(p.baseURL + "/iss/engines/stock/markets/shares/boards/TQBR/securities/" + prices.FundUnitISIN + "/securities.json")
+	currentBoard, errBoard := p.resolvePrimaryBoard(ctx, false)
+	if errBoard != nil {
+		return nil, fmt.Errorf("resolve MOEX fund unit primary board: %w", errBoard)
+	}
+
+	quote, errQuote := p.fetchFundUnitQuote(ctx, currentBoard)
+	if errQuote == nil {
+		return quote, nil
+	}
+
+	refreshedBoard, errRefresh := p.resolvePrimaryBoard(ctx, true)
+	if errRefresh != nil {
+		return nil, fmt.Errorf(
+			"fetch MOEX fund unit quote on board %s: %v; refresh primary board: %w",
+			currentBoard.ID,
+			errQuote,
+			errRefresh,
+		)
+	}
+
+	quote, errRetry := p.fetchFundUnitQuote(ctx, refreshedBoard)
+	if errRetry != nil {
+		return nil, fmt.Errorf("fetch MOEX fund unit quote on board %s after refresh: %w", refreshedBoard.ID, errRetry)
+	}
+
+	return quote, nil
+}
+
+func (p *Provider) resolvePrimaryBoard(ctx context.Context, force bool) (board, error) {
+	date := p.now().In(moscowLocation).Format("2006-01-02")
+
+	p.boardMu.Lock()
+	if !force && p.board.ID != "" && p.boardDate == date {
+		cached := p.board
+		p.boardMu.Unlock()
+		return cached, nil
+	}
+	p.boardMu.Unlock()
+
+	resolved, err := p.fetchPrimaryBoard(ctx)
+	if err != nil {
+		return board{}, err
+	}
+
+	p.boardMu.Lock()
+	p.board = resolved
+	p.boardDate = date
+	p.boardMu.Unlock()
+
+	return resolved, nil
+}
+
+func (p *Provider) fetchPrimaryBoard(ctx context.Context) (board, error) {
+	requestURL, errURL := url.Parse(p.baseURL + "/iss/securities/" + url.PathEscape(prices.FundUnitISIN) + ".json")
 	if errURL != nil {
-		return nil, fmt.Errorf("build MOEX fund unit URL: %w", errURL)
+		return board{}, fmt.Errorf("build MOEX fund unit boards URL: %w", errURL)
+	}
+
+	query := requestURL.Query()
+	query.Set("iss.meta", "off")
+	query.Set("iss.only", "boards")
+	query.Set("boards.columns", "boardid,is_traded,is_primary,currencyid")
+	requestURL.RawQuery = query.Encode()
+
+	var payload issSecurityResponse
+	if err := p.fetchJSON(ctx, requestURL, &payload); err != nil {
+		return board{}, fmt.Errorf("request MOEX fund unit boards: %w", err)
+	}
+
+	var primary *board
+	for _, data := range payload.Boards.Data {
+		row, ok := rowMap(payload.Boards.Columns, data)
+		if !ok {
+			continue
+		}
+
+		isPrimary, okPrimary := boolFlag(row["is_primary"])
+		isTraded, okTraded := boolFlag(row["is_traded"])
+		if !okPrimary || !okTraded || !isPrimary || !isTraded {
+			continue
+		}
+
+		boardID, okBoard := stringValue(row["boardid"])
+		currencyText, okCurrency := stringValue(row["currencyid"])
+		currency, okNormalizedCurrency := normalizeCurrency(currencyText)
+		if !okBoard || !okCurrency || !okNormalizedCurrency {
+			continue
+		}
+
+		candidate := board{ID: boardID, Currency: currency}
+		if primary != nil && *primary != candidate {
+			return board{}, fmt.Errorf("MOEX returned more than one traded primary board for %s", prices.FundUnitISIN)
+		}
+		primary = &candidate
+	}
+
+	if primary == nil {
+		return board{}, fmt.Errorf("MOEX returned no traded primary board for %s", prices.FundUnitISIN)
+	}
+
+	return *primary, nil
+}
+
+func (p *Provider) fetchFundUnitQuote(ctx context.Context, currentBoard board) (*prices.SourceQuote, error) {
+	requestURL, errURL := url.Parse(
+		p.baseURL + "/iss/engines/stock/markets/shares/boards/" + url.PathEscape(currentBoard.ID) +
+			"/securities/" + url.PathEscape(prices.FundUnitISIN) + "/securities.json",
+	)
+	if errURL != nil {
+		return nil, fmt.Errorf("build MOEX fund unit quote URL: %w", errURL)
 	}
 
 	query := requestURL.Query()
@@ -65,51 +189,59 @@ func (p *Provider) FetchFundUnitQuote(ctx context.Context) (*prices.SourceQuote,
 	query.Set("securities.columns", "PREVPRICE,PREVDATE")
 	requestURL.RawQuery = query.Encode()
 
-	request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
-	if errRequest != nil {
-		return nil, fmt.Errorf("create MOEX fund unit request: %w", errRequest)
-	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Cache-Control", "no-cache")
-	request.Header.Set("User-Agent", "FPR/1.0")
-
-	response, errDo := p.client.Do(request)
-	if errDo != nil {
-		return nil, fmt.Errorf("request MOEX fund unit quote: %w", errDo)
-	}
-	defer func() { _ = response.Body.Close() }()
-
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("MOEX fund unit quote returned HTTP %d", response.StatusCode)
+	var payload issQuoteResponse
+	if err := p.fetchJSON(ctx, requestURL, &payload); err != nil {
+		return nil, fmt.Errorf("request MOEX fund unit quote: %w", err)
 	}
 
-	body, errRead := io.ReadAll(io.LimitReader(response.Body, maxResponseSize+1))
-	if errRead != nil {
-		return nil, fmt.Errorf("read MOEX fund unit quote: %w", errRead)
-	}
-	if len(body) > maxResponseSize {
-		return nil, fmt.Errorf("MOEX fund unit quote response exceeds %d bytes", maxResponseSize)
-	}
-
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-
-	var payload issResponse
-	if errDecode := decoder.Decode(&payload); errDecode != nil {
-		return nil, fmt.Errorf("decode MOEX fund unit quote: %w", errDecode)
-	}
-
-	if quote, ok := currentQuote(payload.MarketData); ok {
+	if quote, ok := currentQuote(payload.MarketData, currentBoard.Currency); ok {
 		return quote, nil
 	}
-	if quote, ok := previousQuote(payload.Securities); ok {
+	if quote, ok := previousQuote(payload.Securities, currentBoard.Currency); ok {
 		return quote, nil
 	}
 
 	return nil, fmt.Errorf("MOEX fund unit quote does not contain a usable price")
 }
 
-func currentQuote(block issBlock) (*prices.SourceQuote, bool) {
+func (p *Provider) fetchJSON(ctx context.Context, requestURL *url.URL, target any) error {
+	request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if errRequest != nil {
+		return fmt.Errorf("create MOEX ISS request: %w", errRequest)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Cache-Control", "no-cache")
+	request.Header.Set("User-Agent", providers.UserAgent)
+
+	response, errDo := p.client.Do(request)
+	if errDo != nil {
+		return fmt.Errorf("perform MOEX ISS request: %w", errDo)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+		return fmt.Errorf("MOEX ISS returned HTTP %d", response.StatusCode)
+	}
+
+	body, errRead := io.ReadAll(io.LimitReader(response.Body, maxResponseSize+1))
+	if errRead != nil {
+		return fmt.Errorf("read MOEX ISS response: %w", errRead)
+	}
+	if len(body) > maxResponseSize {
+		return fmt.Errorf("MOEX ISS response exceeds %d bytes", maxResponseSize)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if errDecode := decoder.Decode(target); errDecode != nil {
+		return fmt.Errorf("decode MOEX ISS response: %w", errDecode)
+	}
+
+	return nil
+}
+
+func currentQuote(block issBlock, currency string) (*prices.SourceQuote, bool) {
 	row, ok := firstRow(block)
 	if !ok {
 		return nil, false
@@ -133,13 +265,13 @@ func currentQuote(block issBlock) (*prices.SourceQuote, bool) {
 
 	return &prices.SourceQuote{
 		UnitValue: unitValue,
-		Currency:  "RUB",
+		Currency:  currency,
 		PricedAt:  pricedAt.UTC(),
 		Source:    "last",
 	}, true
 }
 
-func previousQuote(block issBlock) (*prices.SourceQuote, bool) {
+func previousQuote(block issBlock, currency string) (*prices.SourceQuote, bool) {
 	row, ok := firstRow(block)
 	if !ok {
 		return nil, false
@@ -162,7 +294,7 @@ func previousQuote(block issBlock) (*prices.SourceQuote, bool) {
 
 	return &prices.SourceQuote{
 		UnitValue: unitValue,
-		Currency:  "RUB",
+		Currency:  currency,
 		PricedAt:  pricedAt.UTC(),
 		Source:    "previous",
 	}, true
@@ -172,15 +304,44 @@ func firstRow(block issBlock) (map[string]any, bool) {
 	if len(block.Columns) == 0 || len(block.Data) == 0 {
 		return nil, false
 	}
-	if len(block.Data[0]) != len(block.Columns) {
+
+	return rowMap(block.Columns, block.Data[0])
+}
+
+func rowMap(columns []string, data []any) (map[string]any, bool) {
+	if len(columns) == 0 || len(data) != len(columns) {
 		return nil, false
 	}
 
-	result := make(map[string]any, len(block.Columns))
-	for index, column := range block.Columns {
-		result[column] = block.Data[0][index]
+	result := make(map[string]any, len(columns))
+	for index, column := range columns {
+		result[column] = data[index]
 	}
 	return result, true
+}
+
+func boolFlag(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case json.Number:
+		if typed.String() == "1" {
+			return true, true
+		}
+		if typed.String() == "0" {
+			return false, true
+		}
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "1" {
+			return true, true
+		}
+		if text == "0" {
+			return false, true
+		}
+	case bool:
+		return typed, true
+	}
+
+	return false, false
 }
 
 func positiveDecimal(value any) (string, bool) {
@@ -232,4 +393,20 @@ func stringValue(value any) (string, bool) {
 	text, ok := value.(string)
 	text = strings.TrimSpace(text)
 	return text, ok && text != ""
+}
+
+func normalizeCurrency(value string) (string, bool) {
+	currency := strings.ToUpper(strings.TrimSpace(value))
+	if currency == "SUR" {
+		currency = "RUB"
+	}
+	if len(currency) != 3 {
+		return "", false
+	}
+	for _, char := range currency {
+		if char < 'A' || char > 'Z' {
+			return "", false
+		}
+	}
+	return currency, true
 }

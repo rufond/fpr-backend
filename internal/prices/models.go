@@ -10,10 +10,9 @@ import (
 const (
 	ProviderMOEX = "moex"
 
-	FundUnitAssetType  = "fund_unit"
-	FundUnitISIN       = "RU000A101NK4"
-	FundUnitName       = "Фонд первичных размещений"
-	FundUnitMOEXSymbol = "TQBR:RU000A101NK4"
+	FundUnitAssetType = "fund_unit"
+	FundUnitISIN      = "RU000A101NK4"
+	FundUnitName      = "Фонд первичных размещений"
 )
 
 type QuoteSource interface {

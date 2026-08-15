@@ -128,8 +128,14 @@ func validateFundUnitMOEXQuote(quote SourceQuote) error {
 	if !ok || value.Sign() <= 0 {
 		return fmt.Errorf("MOEX fund unit quote has invalid unit value %q", quote.UnitValue)
 	}
-	if quote.Currency != "RUB" {
-		return fmt.Errorf("MOEX fund unit quote has unexpected currency %q", quote.Currency)
+	currency := strings.TrimSpace(quote.Currency)
+	if len(currency) != 3 {
+		return fmt.Errorf("MOEX fund unit quote has invalid currency %q", quote.Currency)
+	}
+	for _, char := range currency {
+		if char < 'A' || char > 'Z' {
+			return fmt.Errorf("MOEX fund unit quote has invalid currency %q", quote.Currency)
+		}
 	}
 	if quote.PricedAt.IsZero() {
 		return fmt.Errorf("MOEX fund unit quote has zero priced_at")

@@ -204,7 +204,7 @@ func testStateManager(t *testing.T, instrumentID int64) *appstate.Manager {
 					ISIN:           "RU000A101NK4",
 					Name:           "Фонд первичных размещений",
 					Provider:       "moex",
-					ProviderSymbol: "TQBR:RU000A101NK4",
+					ProviderSymbol: "RU000A101NK4",
 					UnitValue:      "3210.5",
 					Currency:       "RUB",
 					PricedAt:       time.Date(2026, time.August, 14, 15, 42, 31, 0, time.UTC),

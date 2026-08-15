@@ -190,15 +190,22 @@ func ensureFundUnitMOEXSource(ctx context.Context, tx pgx.Tx) (int64, error) {
 
 	stored, errCollect := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[storedPriceSource])
 	if errCollect == nil {
-		if stored.ProviderSymbol != FundUnitMOEXSymbol {
-			return 0, fmt.Errorf(
-				"fund unit MOEX price source has symbol %q, want %q",
-				stored.ProviderSymbol,
-				FundUnitMOEXSymbol,
-			)
-		}
 		if !stored.Enabled {
 			return 0, fmt.Errorf("fund unit MOEX price source is disabled")
+		}
+		if stored.ProviderSymbol != FundUnitISIN {
+			update := builder.NewUpdate(table)
+			update.Set("provider_symbol", FundUnitISIN)
+			update.SetNow("updated_at")
+			update.Where(builder.WhereEq{Table: table, Column: "id", Value: stored.ID})
+
+			sqlUpdate, bindsUpdate, errBuildUpdate := update.Get()
+			if errBuildUpdate != nil {
+				return 0, fmt.Errorf("build normalize fund unit MOEX price source query: %w", errBuildUpdate)
+			}
+			if _, errExecUpdate := tx.Exec(ctx, sqlUpdate, pgx.NamedArgs(bindsUpdate)); errExecUpdate != nil {
+				return 0, fmt.Errorf("normalize fund unit MOEX price source: %w", errExecUpdate)
+			}
 		}
 
 		return stored.ID, nil
@@ -210,7 +217,7 @@ func ensureFundUnitMOEXSource(ctx context.Context, tx pgx.Tx) (int64, error) {
 	insert := builder.NewInsert(table)
 	insert.Value("instrument_id", instrumentID)
 	insert.Value("provider", ProviderMOEX)
-	insert.Value("provider_symbol", FundUnitMOEXSymbol)
+	insert.Value("provider_symbol", FundUnitISIN)
 	insert.Value("enabled", true)
 	insert.Return(builder.ColumnName{Table: table, Name: "id"})
 

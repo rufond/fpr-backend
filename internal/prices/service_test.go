@@ -190,3 +190,25 @@ func TestSyncFundUnitMOEXRejectsInvalidQuoteBeforeRepository(t *testing.T) {
 		t.Fatal("SyncFundUnitMOEX() error = nil")
 	}
 }
+
+func TestSyncFundUnitMOEXAcceptsProviderCurrency(t *testing.T) {
+	t.Parallel()
+
+	manager := appstate.NewManager()
+	initial := &appstate.State{Fund: &appstate.FundState{}, Prices: &appstate.PriceState{Sources: map[int64]appstate.InstrumentPrice{}}}
+	if err := manager.Initialize(initial); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	repository := &fakePriceRepository{applyPrice: appstate.InstrumentPrice{InstrumentID: 7, Currency: "USD"}}
+	service := NewService(repository, fakeQuoteSource{quote: &SourceQuote{
+		UnitValue: "31.8",
+		Currency:  "USD",
+		PricedAt:  time.Now().UTC(),
+		Source:    "previous",
+	}}, manager)
+
+	if _, err := service.SyncFundUnitMOEX(context.Background()); err != nil {
+		t.Fatalf("SyncFundUnitMOEX() error = %v", err)
+	}
+}

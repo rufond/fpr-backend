@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rufond/fpr-backend/internal/providers"
 )
 
 func TestProviderFetch(t *testing.T) {
@@ -16,8 +18,8 @@ func TestProviderFetch(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %s, want GET", r.Method)
 		}
-		if got := r.Header.Get("User-Agent"); got != userAgent {
-			t.Fatalf("User-Agent = %q, want %q", got, userAgent)
+		if got := r.Header.Get("User-Agent"); got != providers.UserAgent {
+			t.Fatalf("User-Agent = %q, want %q", got, providers.UserAgent)
 		}
 		if got := r.Header.Get("Cache-Control"); got != "no-cache" {
 			t.Fatalf("Cache-Control = %q, want no-cache", got)

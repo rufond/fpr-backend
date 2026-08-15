@@ -5,30 +5,53 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rufond/fpr-backend/internal/providers"
 )
 
-func TestFetchFundUnitQuoteUsesLastPrice(t *testing.T) {
+func TestFetchFundUnitQuoteResolvesPrimaryBoardAndUsesLastPrice(t *testing.T) {
 	t.Parallel()
 
+	var boardRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/iss/engines/stock/markets/shares/boards/TQBR/securities/RU000A101NK4/securities.json" {
-			t.Fatalf("path = %q", request.URL.Path)
-		}
-		if request.URL.Query().Get("iss.only") != "marketdata,securities" {
-			t.Fatalf("iss.only = %q", request.URL.Query().Get("iss.only"))
+		if got := request.Header.Get("User-Agent"); got != providers.UserAgent {
+			t.Fatalf("User-Agent = %q, want %q", got, providers.UserAgent)
 		}
 
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{
-			"marketdata":{"columns":["UPDATETIME","LAST","TRADEDATE"],"data":[["18:42:31",3210.5000,"2026-08-14"]]},
-			"securities":{"columns":["PREVDATE","PREVPRICE"],"data":[["2026-08-13",3180.0]]}
-		}`))
+		switch request.URL.Path {
+		case "/iss/securities/RU000A101NK4.json":
+			boardRequests.Add(1)
+			if request.URL.Query().Get("iss.only") != "boards" {
+				t.Fatalf("iss.only = %q", request.URL.Query().Get("iss.only"))
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{
+				"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[
+					["OLD1",1,0,"SUR"],
+					["NEW1",1,1,"SUR"]
+				]}
+			}`))
+		case "/iss/engines/stock/markets/shares/boards/NEW1/securities/RU000A101NK4/securities.json":
+			if request.URL.Query().Get("iss.only") != "marketdata,securities" {
+				t.Fatalf("iss.only = %q", request.URL.Query().Get("iss.only"))
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{
+				"marketdata":{"columns":["UPDATETIME","LAST","TRADEDATE"],"data":[["18:42:31",3210.5000,"2026-08-14"]]},
+				"securities":{"columns":["PREVDATE","PREVPRICE"],"data":[["2026-08-13",3180.0]]}
+			}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
 	}))
 	defer server.Close()
 
 	provider := NewProvider(server.URL, server.Client())
+	provider.now = func() time.Time { return time.Date(2026, time.August, 15, 10, 0, 0, 0, time.UTC) }
+
 	quote, err := provider.FetchFundUnitQuote(context.Background())
 	if err != nil {
 		t.Fatalf("FetchFundUnitQuote() error = %v", err)
@@ -42,17 +65,101 @@ func TestFetchFundUnitQuoteUsesLastPrice(t *testing.T) {
 	if !quote.PricedAt.Equal(want) {
 		t.Fatalf("PricedAt = %s, want %s", quote.PricedAt, want)
 	}
+	if boardRequests.Load() != 1 {
+		t.Fatalf("board requests = %d, want 1", boardRequests.Load())
+	}
 }
 
-func TestFetchFundUnitQuoteFallsBackToPreviousPrice(t *testing.T) {
+func TestFetchFundUnitQuoteCachesBoardForTradingDay(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{
-			"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[null,"2026-08-15","10:00:00"]]},
-			"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[3180.0,"2026-08-14"]]}
-		}`))
+	var boardRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/iss/securities/RU000A101NK4.json":
+			boardRequests.Add(1)
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["DYN1",1,1,"RUB"]]}}`))
+		case "/iss/engines/stock/markets/shares/boards/DYN1/securities/RU000A101NK4/securities.json":
+			_, _ = writer.Write([]byte(`{
+				"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[3200,"2026-08-15","10:00:00"]]},
+				"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[3190,"2026-08-14"]]}
+			}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	provider.now = func() time.Time { return time.Date(2026, time.August, 15, 10, 0, 0, 0, time.UTC) }
+
+	for range 2 {
+		if _, err := provider.FetchFundUnitQuote(context.Background()); err != nil {
+			t.Fatalf("FetchFundUnitQuote() error = %v", err)
+		}
+	}
+
+	if boardRequests.Load() != 1 {
+		t.Fatalf("board requests = %d, want 1", boardRequests.Load())
+	}
+}
+
+func TestFetchFundUnitQuoteRefreshesBoardAfterQuoteFailure(t *testing.T) {
+	t.Parallel()
+
+	var boardRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/iss/securities/RU000A101NK4.json":
+			requestNumber := boardRequests.Add(1)
+			boardID := "OLD1"
+			if requestNumber > 1 {
+				boardID = "NEW1"
+			}
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["` + boardID + `",1,1,"RUB"]]}}`))
+		case "/iss/engines/stock/markets/shares/boards/OLD1/securities/RU000A101NK4/securities.json":
+			writer.WriteHeader(http.StatusNotFound)
+		case "/iss/engines/stock/markets/shares/boards/NEW1/securities/RU000A101NK4/securities.json":
+			_, _ = writer.Write([]byte(`{
+				"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[3210,"2026-08-15","10:01:00"]]},
+				"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[3200,"2026-08-14"]]}
+			}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	provider.now = func() time.Time { return time.Date(2026, time.August, 15, 10, 0, 0, 0, time.UTC) }
+
+	quote, err := provider.FetchFundUnitQuote(context.Background())
+	if err != nil {
+		t.Fatalf("FetchFundUnitQuote() error = %v", err)
+	}
+	if quote.UnitValue != "3210" {
+		t.Fatalf("quote = %#v", quote)
+	}
+	if boardRequests.Load() != 2 {
+		t.Fatalf("board requests = %d, want 2", boardRequests.Load())
+	}
+}
+
+func TestFetchFundUnitQuoteFallsBackToPreviousPriceAndBoardCurrency(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/iss/securities/RU000A101NK4.json":
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["USD1",1,1,"USD"]]}}`))
+		case "/iss/engines/stock/markets/shares/boards/USD1/securities/RU000A101NK4/securities.json":
+			_, _ = writer.Write([]byte(`{
+				"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[null,"2026-08-15","10:00:00"]]},
+				"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[31.80,"2026-08-14"]]}
+			}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
 	}))
 	defer server.Close()
 
@@ -62,7 +169,7 @@ func TestFetchFundUnitQuoteFallsBackToPreviousPrice(t *testing.T) {
 		t.Fatalf("FetchFundUnitQuote() error = %v", err)
 	}
 
-	if quote.UnitValue != "3180" || quote.Source != "previous" {
+	if quote.UnitValue != "31.8" || quote.Currency != "USD" || quote.Source != "previous" {
 		t.Fatalf("quote = %#v", quote)
 	}
 
@@ -72,29 +179,11 @@ func TestFetchFundUnitQuoteFallsBackToPreviousPrice(t *testing.T) {
 	}
 }
 
-func TestFetchFundUnitQuoteRejectsMissingPrice(t *testing.T) {
+func TestFetchFundUnitQuoteRejectsMissingPrimaryBoard(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{
-			"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[null,"2026-08-15","10:00:00"]]},
-			"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[null,"2026-08-14"]]}
-		}`))
-	}))
-	defer server.Close()
-
-	provider := NewProvider(server.URL, server.Client())
-	if _, err := provider.FetchFundUnitQuote(context.Background()); err == nil {
-		t.Fatal("FetchFundUnitQuote() error = nil")
-	}
-}
-
-func TestFetchFundUnitQuoteRejectsHTTPError(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.WriteHeader(http.StatusBadGateway)
+		_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["OLD1",1,0,"RUB"]]}}`))
 	}))
 	defer server.Close()
 
@@ -108,7 +197,6 @@ func TestFetchFundUnitQuoteRejectsOversizedResponse(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(strings.Repeat(" ", maxResponseSize+1)))
 	}))
 	defer server.Close()

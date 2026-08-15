@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/fund"
+	"github.com/rufond/fpr-backend/internal/providers"
 )
 
 const (
 	DefaultTimeout  = 30 * time.Second
 	maxResponseSize = 16 << 20
-	userAgent       = "Mozilla/5.0 (compatible; FPR/1.0; +https://github.com/rufond/fpr-backend)"
 )
 
 type Provider struct {
@@ -43,7 +43,7 @@ func (p *Provider) Fetch(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("create management company request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", providers.UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 	req.Header.Set("Cache-Control", "no-cache")
 
