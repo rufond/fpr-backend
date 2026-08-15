@@ -41,7 +41,7 @@ func main() {
 	}
 	defer application.Stop()
 
-	if errRun := routes.Run(ctx, cfg.HTTP.Addr, application.Routes(), application.HTTPRoutes()); errRun != nil {
+	if errRun := routes.Run(ctx, cfg.HTTP.Addr, application.Routes(), application.HTTPRoutes(), application.UserResolver); errRun != nil {
 		log.Panic().Err(errRun).Msg("run server")
 	}
 }

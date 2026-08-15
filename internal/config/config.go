@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const defaultManagementCompanyFundURL = "https://ew-mc.ru/funds/zakrytyy-paevoy-investitsionnyy-fond-rynochnykh-finansovykh-instrumentov-fond-pervichnykh-razmeshche/"
@@ -13,6 +16,7 @@ type Config struct {
 
 	HTTP              HTTPConfig
 	DB                DBConfig
+	Admin             AdminConfig
 	ManagementCompany ManagementCompanyConfig
 }
 
@@ -32,6 +36,11 @@ type DBConfig struct {
 	URL string
 }
 
+type AdminConfig struct {
+	Login        string
+	PasswordHash string
+}
+
 type ManagementCompanyConfig struct {
 	FundURL string
 }
@@ -40,6 +49,20 @@ func Load() (*Config, error) {
 	db, err := loadDBConfig()
 	if err != nil {
 		return nil, err
+	}
+
+	admin := AdminConfig{
+		Login:        strings.TrimSpace(os.Getenv("FPR_ADMIN_LOGIN")),
+		PasswordHash: strings.TrimSpace(os.Getenv("FPR_ADMIN_PASSWORD_HASH")),
+	}
+	if admin.Login == "" {
+		return nil, fmt.Errorf("env FPR_ADMIN_LOGIN is empty")
+	}
+	if admin.PasswordHash == "" {
+		return nil, fmt.Errorf("env FPR_ADMIN_PASSWORD_HASH is empty")
+	}
+	if _, errCost := bcrypt.Cost([]byte(admin.PasswordHash)); errCost != nil {
+		return nil, fmt.Errorf("FPR_ADMIN_PASSWORD_HASH must be a valid bcrypt hash: %w", errCost)
 	}
 
 	httpAddr := os.Getenv("HTTP_ADDR")
@@ -64,6 +87,7 @@ func Load() (*Config, error) {
 		Debug:             os.Getenv("DEBUG") == "true",
 		HTTP:              HTTPConfig{Addr: httpAddr},
 		DB:                db,
+		Admin:             admin,
 		ManagementCompany: ManagementCompanyConfig{FundURL: managementCompanyFundURL},
 	}, nil
 }

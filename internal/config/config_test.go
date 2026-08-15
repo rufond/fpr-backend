@@ -5,8 +5,10 @@ import (
 	"testing"
 )
 
+const testAdminPasswordHash = "$2a$10$qy9oAvf/CE8rc5ANmO0v5O/hF82llpqPEMRLqx7n6SlT.v.X.A8ru"
+
 func TestLoadDefaults(t *testing.T) {
-	setRequiredDBEnv(t)
+	setRequiredEnv(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -14,6 +16,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.HTTP.Addr != ":8080" {
 		t.Fatalf("HTTP addr = %q, want :8080", cfg.HTTP.Addr)
+	}
+	if cfg.Admin.Login != "admin" || cfg.Admin.PasswordHash != testAdminPasswordHash {
+		t.Fatalf("Admin = %#v", cfg.Admin)
 	}
 	if cfg.ManagementCompany.FundURL != defaultManagementCompanyFundURL {
 		t.Fatalf("management company fund URL = %q, want default", cfg.ManagementCompany.FundURL)
@@ -24,7 +29,7 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadBuildsEscapedDatabaseURL(t *testing.T) {
-	setRequiredDBEnv(t)
+	setRequiredEnv(t)
 	t.Setenv("DB_USER", "fpr user")
 	t.Setenv("DB_PASS", "p@ss:/word")
 	t.Setenv("DB_SCHEMA", "fpr_runtime")
@@ -52,7 +57,7 @@ func TestLoadBuildsEscapedDatabaseURL(t *testing.T) {
 }
 
 func TestLoadRequiresDatabasePassword(t *testing.T) {
-	setRequiredDBEnv(t)
+	setRequiredEnv(t)
 	t.Setenv("DB_PASS", "")
 
 	_, err := Load()
@@ -61,8 +66,38 @@ func TestLoadRequiresDatabasePassword(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresAdminCredentials(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		env  string
+	}{
+		{name: "login", env: "FPR_ADMIN_LOGIN"},
+		{name: "password hash", env: "FPR_ADMIN_PASSWORD_HASH"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(test.env, "")
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() error = nil, want %s error", test.env)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidAdminPasswordHash(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FPR_ADMIN_PASSWORD_HASH", "not-a-bcrypt-hash")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want bcrypt hash error")
+	}
+}
+
 func TestLoadRejectsInvalidManagementCompanyURL(t *testing.T) {
-	setRequiredDBEnv(t)
+	setRequiredEnv(t)
 	t.Setenv("MANAGEMENT_COMPANY_FUND_URL", "://broken")
 
 	_, err := Load()
@@ -71,7 +106,7 @@ func TestLoadRejectsInvalidManagementCompanyURL(t *testing.T) {
 	}
 }
 
-func setRequiredDBEnv(t *testing.T) {
+func setRequiredEnv(t *testing.T) {
 	t.Helper()
 
 	t.Setenv("DEBUG", "false")
@@ -83,5 +118,7 @@ func setRequiredDBEnv(t *testing.T) {
 	t.Setenv("DB_PASS", "secret")
 	t.Setenv("DB_SCHEMA", "")
 	t.Setenv("DB_SSLMODE", "")
+	t.Setenv("FPR_ADMIN_LOGIN", "admin")
+	t.Setenv("FPR_ADMIN_PASSWORD_HASH", testAdminPasswordHash)
 	t.Setenv("MANAGEMENT_COMPANY_FUND_URL", "")
 }

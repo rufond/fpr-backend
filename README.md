@@ -17,7 +17,7 @@ Backend сайта [fpr.rufond.su](https://fpr.rufond.su/) — неофициа�
 cp .env.example .env
 ```
 
-Укажите параметры подключения к PostgreSQL, затем загрузите переменные и запустите приложение:
+Укажите параметры подключения к PostgreSQL, а также `FPR_ADMIN_LOGIN` и bcrypt-хеш пароля в `FPR_ADMIN_PASSWORD_HASH`, затем загрузите переменные и запустите приложение:
 
 ```bash
 set -a

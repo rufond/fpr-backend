@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 )
 
 type Route struct {
-	Method  string
-	Path    string
-	Handler func(request Request) (int, error, any)
+	Method       string
+	Path         string
+	AuthRequired bool
+	Handler      func(request Request) (int, error, any)
 }
 
 type HTTPRoute struct {
@@ -25,16 +27,52 @@ type HTTPRoute struct {
 	Handler http.Handler
 }
 
+type User struct {
+	Login string
+	Token string
+}
+
+type UserResolver func(token string) *User
+
 type Request struct {
 	Body      map[string]any
 	Method    string
 	Context   context.Context
 	IP        string
 	UserAgent string
+	User      *User
 }
 
-func Run(ctx context.Context, addr string, routes []Route, httpRoutes []HTTPRoute) error {
-	routes = append(routes, Route{Path: "/", Handler: Handler404})
+func Run(ctx context.Context, addr string, routes []Route, httpRoutes []HTTPRoute, resolveUser UserResolver) error {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           NewHandler(routes, httpRoutes, resolveUser),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Err(err).Msg("shutdown http server")
+		}
+	}()
+
+	log.Info().Str("addr", addr).Msg("starting http server")
+
+	err := server.ListenAndServe()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+
+	return nil
+}
+
+func NewHandler(routes []Route, httpRoutes []HTTPRoute, resolveUser UserResolver) http.Handler {
+	routes = append(slices.Clone(routes), Route{Path: "/", Handler: Handler404})
 
 	mux := http.NewServeMux()
 
@@ -46,39 +84,49 @@ func Run(ctx context.Context, addr string, routes []Route, httpRoutes []HTTPRout
 		mux.HandleFunc(routePattern(route.Method, route.Path), func(writer http.ResponseWriter, request *http.Request) {
 			start := time.Now()
 
-			var (
-				body       map[string]any
-				status     int
-				errHandler error
-				content    any
-			)
-
-			bodyBytes, errReadBody := io.ReadAll(request.Body)
-			if errReadBody != nil {
-				status, errHandler, content = http.StatusBadRequest, errReadBody, nil
-			}
-
-			if len(bodyBytes) == 0 {
-				bodyBytes = []byte("{}")
-			}
-
-			if errHandler == nil {
-				errUnmarshal := json.Unmarshal(bodyBytes, &body)
-				if errUnmarshal != nil {
-					status, errHandler, content = http.StatusBadRequest, errUnmarshal, nil
-				}
-			}
-
 			req := Request{
-				Body:      body,
 				Method:    request.Method,
 				Context:   request.Context(),
 				IP:        GetRealIP(request),
 				UserAgent: request.UserAgent(),
 			}
 
-			if errHandler == nil {
-				status, errHandler, content = route.Handler(req)
+			authorization := strings.TrimSpace(request.Header.Get("Authorization"))
+			if scheme, token, found := strings.Cut(authorization, " "); found && strings.EqualFold(scheme, "Bearer") {
+				token = strings.TrimSpace(token)
+				if token != "" && resolveUser != nil {
+					req.User = resolveUser(token)
+				}
+			}
+
+			var (
+				status     int
+				errHandler error
+				content    any
+			)
+
+			if route.AuthRequired && req.User == nil {
+				status = http.StatusUnauthorized
+				content = map[string]any{"error": http.StatusText(http.StatusUnauthorized)}
+			} else {
+				bodyBytes, errReadBody := io.ReadAll(request.Body)
+				if errReadBody != nil {
+					status, errHandler = http.StatusBadRequest, errReadBody
+				}
+
+				if len(bodyBytes) == 0 {
+					bodyBytes = []byte("{}")
+				}
+
+				if errHandler == nil {
+					if errUnmarshal := json.Unmarshal(bodyBytes, &req.Body); errUnmarshal != nil {
+						status, errHandler = http.StatusBadRequest, errUnmarshal
+					}
+				}
+
+				if errHandler == nil {
+					status, errHandler, content = route.Handler(req)
+				}
 			}
 
 			writer.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -124,31 +172,7 @@ func Run(ctx context.Context, addr string, routes []Route, httpRoutes []HTTPRout
 		})
 	}
 
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	go func() {
-		<-ctx.Done()
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Err(err).Msg("shutdown http server")
-		}
-	}()
-
-	log.Info().Str("addr", addr).Msg("starting http server")
-
-	err := server.ListenAndServe()
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-
-	return nil
+	return mux
 }
 
 func GetRealIP(request *http.Request) string {

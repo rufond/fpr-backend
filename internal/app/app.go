@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
+	"github.com/rufond/fpr-backend/internal/auth"
 	"github.com/rufond/fpr-backend/internal/deps"
 	"github.com/rufond/fpr-backend/internal/fund"
 	"github.com/rufond/fpr-backend/internal/prices"
@@ -15,7 +16,9 @@ import (
 )
 
 type App struct {
-	deps      *deps.Deps
+	UserResolver routes.UserResolver
+
+	auth      *auth.Module
 	fund      *fund.Module
 	prices    *prices.Module
 	realtime  *realtime.Hub
@@ -25,6 +28,7 @@ type App struct {
 func New(d *deps.Deps) *App {
 	realtimeHub := realtime.NewHub()
 	stateManager := appstate.NewManager()
+	authModule := auth.NewModule(d.Config.Admin.Login, d.Config.Admin.PasswordHash)
 	fundModule := fund.NewModule(d.DB, d.ManagementCompany, stateManager)
 	priceModule := prices.NewModule(d.DB, d.MOEX, stateManager)
 	schedulerModule := scheduler.NewModule(d.DB, realtimeHub)
@@ -49,11 +53,12 @@ func New(d *deps.Deps) *App {
 	)
 
 	return &App{
-		deps:      d,
-		fund:      fundModule,
-		prices:    priceModule,
-		realtime:  realtimeHub,
-		scheduler: schedulerModule,
+		UserResolver: authModule.Service.ResolveUser,
+		auth:         authModule,
+		fund:         fundModule,
+		prices:       priceModule,
+		realtime:     realtimeHub,
+		scheduler:    schedulerModule,
 	}
 }
 
@@ -88,6 +93,17 @@ func (a *App) HTTPRoutes() []routes.HTTPRoute {
 func (a *App) Routes() []routes.Route {
 	return []routes.Route{
 		{
+			Method:  http.MethodPost,
+			Path:    "/api/v1/auth/login",
+			Handler: a.auth.Handler.Login,
+		},
+		{
+			Method:       http.MethodPost,
+			Path:         "/api/v1/auth/logout",
+			AuthRequired: true,
+			Handler:      a.auth.Handler.Logout,
+		},
+		{
 			Method:  http.MethodGet,
 			Path:    "/api/v1/fund/state",
 			Handler: a.fund.Handler.State,
@@ -96,6 +112,18 @@ func (a *App) Routes() []routes.Route {
 			Method:  http.MethodPost,
 			Path:    "/api/v1/fund/history",
 			Handler: a.fund.Handler.History,
+		},
+		{
+			Method:       http.MethodGet,
+			Path:         "/api/v1/admin/scheduler/jobs",
+			AuthRequired: true,
+			Handler:      a.scheduler.Handler.Jobs,
+		},
+		{
+			Method:       http.MethodPost,
+			Path:         "/api/v1/admin/scheduler/run",
+			AuthRequired: true,
+			Handler:      a.scheduler.Handler.RunJob,
 		},
 		{
 			Method:  http.MethodGet,
