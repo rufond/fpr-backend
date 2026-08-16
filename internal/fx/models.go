@@ -10,7 +10,7 @@ import (
 const ProviderMOEX = "moex"
 
 type Source interface {
-	FetchRate(ctx context.Context, baseCurrency string, quoteCurrency string) (*SourceRate, error)
+	FetchUSDRUB(ctx context.Context) (SourceRate, error)
 }
 
 type SourceRate struct {

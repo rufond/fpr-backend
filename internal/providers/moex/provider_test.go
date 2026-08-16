@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rufond/fpr-backend/internal/currency"
 	"github.com/rufond/fpr-backend/internal/fx"
 	"github.com/rufond/fpr-backend/internal/providers"
 )
@@ -181,11 +180,32 @@ func TestFetchFundUnitQuoteFallsBackToPreviousPriceAndBoardCurrency(t *testing.T
 	}
 }
 
-func TestFetchFundUnitQuoteRejectsMissingPrimaryBoard(t *testing.T) {
+func TestFetchFundUnitQuoteUsesOnlyTradedBoardWithoutPrimary(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/iss/securities/RU000A101NK4.json":
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["ONLY1","stock","shares",1,0,"RUB"]]}}`))
+		case "/iss/engines/stock/markets/shares/boards/ONLY1/securities/RU000A101NK4/securities.json":
+			_, _ = writer.Write([]byte(`{"marketdata":{"columns":["LAST","TRADEDATE","TIME"],"data":[[3210.5,"2026-08-14","18:42:31"]]},"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[]}}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	if _, err := provider.FetchFundUnitQuote(context.Background()); err != nil {
+		t.Fatalf("FetchFundUnitQuote() error = %v", err)
+	}
+}
+
+func TestFetchFundUnitQuoteRejectsAmbiguousTradedBoardsWithoutPrimary(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["OLD1","stock","shares",1,0,"RUB"]]}}`))
+		_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["ONE","stock","shares",1,0,"RUB"],["TWO","stock","shares",1,0,"RUB"]]}}`))
 	}))
 	defer server.Close()
 
@@ -321,9 +341,9 @@ func TestFetchRateUSDRUBUsesCETS(t *testing.T) {
 	defer server.Close()
 
 	provider := NewProvider(server.URL, server.Client())
-	rate, err := provider.FetchRate(context.Background(), currency.USD, currency.RUB)
+	rate, err := provider.FetchUSDRUB(context.Background())
 	if err != nil {
-		t.Fatalf("FetchRate() error = %v", err)
+		t.Fatalf("FetchUSDRUB() error = %v", err)
 	}
 
 	if rate.Provider != fx.ProviderMOEX || rate.BaseCurrency != "USD" || rate.QuoteCurrency != "RUB" || rate.Rate != "79.125" || rate.Source != "last" {
@@ -333,14 +353,5 @@ func TestFetchRateUSDRUBUsesCETS(t *testing.T) {
 	want := time.Date(2026, time.August, 15, 15, 42, 31, 0, time.UTC)
 	if !rate.PricedAt.Equal(want) {
 		t.Fatalf("PricedAt = %s, want %s", rate.PricedAt, want)
-	}
-}
-
-func TestFetchRateRejectsUnsupportedPair(t *testing.T) {
-	t.Parallel()
-
-	provider := NewProvider("http://127.0.0.1", &http.Client{})
-	if _, err := provider.FetchRate(context.Background(), "EUR", "RUB"); err == nil {
-		t.Fatal("FetchRate() error = nil")
 	}
 }

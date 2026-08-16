@@ -12,72 +12,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 )
 
-func TestHubPublishNormalizesEvent(t *testing.T) {
-	hub := NewHub()
-	subscriber, ok := hub.register()
-	if !ok {
-		t.Fatal("register returned false")
-	}
-	defer hub.unregister(subscriber)
-
-	hello := <-subscriber.events
-	if hello.Type != eventTypeHello {
-		t.Fatalf("hello type = %q, want %q", hello.Type, eventTypeHello)
-	}
-
-	pricedAt := time.Date(2026, time.August, 14, 15, 42, 31, 0, time.FixedZone("test", 2*60*60))
-	hub.Publish(Update{
-		Scopes:        []string{ScopeFundState, ScopeFundHistory, ScopeFXRates, ScopeInstrumentPrices, ScopeFundState, ""},
-		InstrumentIDs: []int64{7, 2, 7, 0, -1},
-		InstrumentPrices: []InstrumentPriceDelta{
-			{InstrumentID: 9, UnitValue: "3200", Currency: "RUB", PricedAt: pricedAt},
-			{InstrumentID: 3, UnitValue: "100", Currency: "USD", PricedAt: pricedAt},
-			{InstrumentID: 9, UnitValue: "3210.5", Currency: "RUB", PricedAt: pricedAt},
-			{InstrumentID: 0, UnitValue: "1", Currency: "RUB", PricedAt: pricedAt},
-		},
-		FXRates: []FXRateDelta{
-			{BaseCurrency: "usd", QuoteCurrency: "rub", Rate: "79", PricedAt: pricedAt},
-			{BaseCurrency: "USD", QuoteCurrency: "RUB", Rate: "79.125", PricedAt: pricedAt},
-			{BaseCurrency: "", QuoteCurrency: "RUB", Rate: "1", PricedAt: pricedAt},
-		},
-	})
-
-	event := <-subscriber.events
-
-	if event.Type != eventTypeChanged {
-		t.Fatalf("event type = %q, want %q", event.Type, eventTypeChanged)
-	}
-
-	if event.Revision != 1 {
-		t.Fatalf("revision = %d, want 1", event.Revision)
-	}
-
-	if !slices.Equal(event.Scopes, []string{ScopeFundHistory, ScopeFundState, ScopeFXRates, ScopeInstrumentPrices}) {
-		t.Fatalf("scopes = %#v", event.Scopes)
-	}
-
-	if !slices.Equal(event.InstrumentIDs, []int64{2, 3, 7, 9}) {
-		t.Fatalf("instrument ids = %#v", event.InstrumentIDs)
-	}
-
-	if len(event.InstrumentPrices) != 2 || event.InstrumentPrices[0].InstrumentID != 3 || event.InstrumentPrices[1].InstrumentID != 9 {
-		t.Fatalf("instrument prices = %#v", event.InstrumentPrices)
-	}
-	if event.InstrumentPrices[1].UnitValue != "3210.5" {
-		t.Fatalf("latest instrument price = %#v", event.InstrumentPrices[1])
-	}
-	if event.InstrumentPrices[0].PricedAt.Location() != time.UTC || event.InstrumentPrices[1].PricedAt.Location() != time.UTC {
-		t.Fatalf("instrument price timestamps are not UTC: %#v", event.InstrumentPrices)
-	}
-	if len(event.FXRates) != 1 || event.FXRates[0].BaseCurrency != "USD" || event.FXRates[0].QuoteCurrency != "RUB" || event.FXRates[0].Rate != "79.125" {
-		t.Fatalf("FX rates = %#v", event.FXRates)
-	}
-	if event.FXRates[0].PricedAt.Location() != time.UTC {
-		t.Fatalf("FX rate timestamp is not UTC: %#v", event.FXRates[0])
-	}
-}
-
-func TestHubPublishIgnoresEmptyScopes(t *testing.T) {
+func TestHubPublishUsesCanonicalInternalData(t *testing.T) {
 	hub := NewHub()
 	subscriber, ok := hub.register()
 	if !ok {
@@ -86,7 +21,47 @@ func TestHubPublishIgnoresEmptyScopes(t *testing.T) {
 	defer hub.unregister(subscriber)
 
 	<-subscriber.events
-	hub.Publish(Update{Scopes: []string{"", ""}})
+
+	pricedAt := time.Date(2026, time.August, 14, 13, 42, 31, 0, time.UTC)
+	hub.Publish(Update{
+		Scopes: []string{ScopeFundState, ScopeFXRates, ScopeInstrumentPrices},
+		InstrumentPrices: []InstrumentPriceDelta{
+			{InstrumentID: 9, UnitValue: "3210.5", Currency: "RUB", PricedAt: pricedAt},
+		},
+		FXRates: []FXRateDelta{
+			{BaseCurrency: "USD", QuoteCurrency: "RUB", Rate: "79.125", PricedAt: pricedAt},
+		},
+	})
+
+	event := <-subscriber.events
+
+	if event.Type != eventTypeChanged || event.Revision != 1 {
+		t.Fatalf("event = %#v", event)
+	}
+	if !slices.Equal(event.Scopes, []string{ScopeFundState, ScopeFXRates, ScopeInstrumentPrices}) {
+		t.Fatalf("scopes = %#v", event.Scopes)
+	}
+	if !slices.Equal(event.InstrumentIDs, []int64{9}) {
+		t.Fatalf("instrument ids = %#v", event.InstrumentIDs)
+	}
+	if len(event.InstrumentPrices) != 1 || event.InstrumentPrices[0].InstrumentID != 9 {
+		t.Fatalf("instrument prices = %#v", event.InstrumentPrices)
+	}
+	if len(event.FXRates) != 1 || event.FXRates[0].Rate != "79.125" {
+		t.Fatalf("FX rates = %#v", event.FXRates)
+	}
+}
+
+func TestHubPublishIgnoresNoScopes(t *testing.T) {
+	hub := NewHub()
+	subscriber, ok := hub.register()
+	if !ok {
+		t.Fatal("register returned false")
+	}
+	defer hub.unregister(subscriber)
+
+	<-subscriber.events
+	hub.Publish(Update{})
 
 	select {
 	case event := <-subscriber.events:

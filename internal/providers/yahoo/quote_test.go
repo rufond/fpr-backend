@@ -9,7 +9,7 @@ func TestNormalizeCurrentQuotePreservesYahooPenceMeaning(t *testing.T) {
 	t.Parallel()
 
 	marketTime := time.Date(2026, time.August, 3, 15, 30, 0, 0, time.UTC)
-	result, err := NormalizeCurrentQuote(Quote{
+	result, err := normalizeCurrentQuote(quote{
 		Symbol:            " azn.l ",
 		Currency:          "GBp",
 		Price:             "12632.0",
@@ -19,7 +19,7 @@ func TestNormalizeCurrentQuotePreservesYahooPenceMeaning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.Symbol != "AZN.L" || result.UnitValue != "126.32" || result.Currency != "GBP" {
+	if result.UnitValue != "126.32" || result.Currency != "GBP" {
 		t.Fatalf("result = %#v", result)
 	}
 	if !result.PricedAt.Equal(marketTime) {
@@ -30,7 +30,7 @@ func TestNormalizeCurrentQuotePreservesYahooPenceMeaning(t *testing.T) {
 func TestNormalizeCurrentQuoteDoesNotTreatGBPAsPence(t *testing.T) {
 	t.Parallel()
 
-	result, err := NormalizeCurrentQuote(Quote{
+	result, err := normalizeCurrentQuote(quote{
 		Symbol:            "VOD.L",
 		Currency:          "GBP",
 		Price:             "12.6320",
@@ -61,7 +61,7 @@ func TestNormalizeCurrentQuoteNormalizesGBXAndILA(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.currency, func(t *testing.T) {
-			result, err := NormalizeCurrentQuote(Quote{
+			result, err := normalizeCurrentQuote(quote{
 				Symbol:            "TEST",
 				Currency:          test.currency,
 				Price:             test.price,
@@ -80,7 +80,7 @@ func TestNormalizeCurrentQuoteNormalizesGBXAndILA(t *testing.T) {
 func TestNormalizeCurrentQuoteKeepsExactDecimalWithoutFloat64(t *testing.T) {
 	t.Parallel()
 
-	result, err := NormalizeCurrentQuote(Quote{
+	result, err := normalizeCurrentQuote(quote{
 		Symbol:            "TEST",
 		Currency:          "USD",
 		Price:             "1.2300000000000000000000000001",
@@ -98,7 +98,7 @@ func TestNormalizeCurrentQuoteKeepsExactDecimalWithoutFloat64(t *testing.T) {
 func TestNormalizeCurrentQuoteAcceptsExponentNotation(t *testing.T) {
 	t.Parallel()
 
-	result, err := NormalizeCurrentQuote(Quote{
+	result, err := normalizeCurrentQuote(quote{
 		Symbol:            "TEST",
 		Currency:          "USD",
 		Price:             "1.234e2",
@@ -117,8 +117,7 @@ func TestNormalizeCurrentQuoteRejectsInvalidFields(t *testing.T) {
 	t.Parallel()
 
 	marketTime := time.Date(2026, time.August, 3, 15, 30, 0, 0, time.UTC)
-	tests := []Quote{
-		{Symbol: "", Currency: "USD", Price: "1", RegularMarketTime: marketTime},
+	tests := []quote{
 		{Symbol: "TEST", Currency: "", Price: "1", RegularMarketTime: marketTime},
 		{Symbol: "TEST", Currency: "US", Price: "1", RegularMarketTime: marketTime},
 		{Symbol: "TEST", Currency: "USD", Price: "N/A", RegularMarketTime: marketTime},
@@ -128,65 +127,8 @@ func TestNormalizeCurrentQuoteRejectsInvalidFields(t *testing.T) {
 	}
 
 	for index, quote := range tests {
-		if _, err := NormalizeCurrentQuote(quote); err == nil {
+		if _, err := normalizeCurrentQuote(quote); err == nil {
 			t.Fatalf("case %d: expected error", index)
 		}
-	}
-}
-
-func TestNormalizePreviousCloseUsesExchangeLocalMarketDate(t *testing.T) {
-	t.Parallel()
-
-	result, err := NormalizePreviousClose(Quote{
-		Symbol:               "AAPL",
-		Currency:             "USD",
-		PreviousClose:        "231.2500",
-		RegularMarketTime:    time.Date(2026, time.August, 4, 0, 30, 0, 0, time.UTC),
-		ExchangeTimezoneName: "America/New_York",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	wantDate := time.Date(2026, time.August, 3, 0, 0, 0, 0, time.UTC)
-	if result == nil || result.UnitValue != "231.25" || result.Currency != "USD" || !result.PriceDate.Equal(wantDate) {
-		t.Fatalf("result = %#v, want date %s", result, wantDate)
-	}
-}
-
-func TestNormalizePreviousCloseKeepsCurrentQuoteIndependent(t *testing.T) {
-	t.Parallel()
-
-	quote := Quote{
-		Symbol:               "AZN.L",
-		Currency:             "GBp",
-		Price:                "12632",
-		PreviousClose:        "N/A",
-		RegularMarketTime:    time.Date(2026, time.August, 3, 15, 30, 0, 0, time.UTC),
-		ExchangeTimezoneName: "Europe/London",
-	}
-
-	current, errCurrent := NormalizeCurrentQuote(quote)
-	if errCurrent != nil {
-		t.Fatal(errCurrent)
-	}
-	if current.UnitValue != "126.32" {
-		t.Fatalf("current = %#v", current)
-	}
-
-	if _, errPrevious := NormalizePreviousClose(quote); errPrevious == nil {
-		t.Fatalf("expected previous close error")
-	}
-}
-
-func TestNormalizePreviousCloseReturnsNilWhenYahooDidNotProvideIt(t *testing.T) {
-	t.Parallel()
-
-	result, err := NormalizePreviousClose(Quote{PreviousClose: "  "})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != nil {
-		t.Fatalf("result = %#v, want nil", result)
 	}
 }

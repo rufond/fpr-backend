@@ -63,3 +63,20 @@ func TestManagerUpdateDoesNotPublishOnError(t *testing.T) {
 		t.Fatal("state changed after failed update")
 	}
 }
+
+func TestManagerUpdateRejectsUninitializedState(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager()
+	called := false
+	err := manager.Update(func(*State) (*State, error) {
+		called = true
+		return &State{}, nil
+	})
+	if err == nil {
+		t.Fatal("Update() error = nil")
+	}
+	if called {
+		t.Fatal("Update() called mutation before initialization")
+	}
+}

@@ -83,73 +83,60 @@ func (s *Service) EnsureInitialized(ctx context.Context) (*SyncResult, error) {
 		return nil, errState
 	}
 
-	result, err := s.SyncManagementCompany(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("initial management company sync: %w", err)
+	page, sourceHash, errPage := s.fetchManagementCompanyPage(ctx)
+	if errPage != nil {
+		return nil, fmt.Errorf("initial management company sync: %w", errPage)
 	}
+
+	result, fundState, errApply := s.applyManagementCompanyPage(ctx, page, sourceHash)
+	if errApply != nil {
+		return nil, fmt.Errorf("initial management company sync: %w", errApply)
+	}
+
 	if !result.SnapshotCreated {
 		return nil, fmt.Errorf("initial management company sync did not create a snapshot")
+	}
+
+	if fundState == nil {
+		return nil, fmt.Errorf("initial management company sync returned no fund state")
+	}
+
+	if errInitialize := s.state.Initialize(&appstate.State{Fund: fundState}); errInitialize != nil {
+		return nil, fmt.Errorf("initialize application state: %w", errInitialize)
 	}
 
 	return result, nil
 }
 
 func (s *Service) SyncManagementCompany(ctx context.Context) (*SyncResult, error) {
-	if s.source == nil {
-		return nil, fmt.Errorf("management company source is not configured")
-	}
 	if s.state == nil {
 		return nil, fmt.Errorf("application state manager is not configured")
 	}
 
-	page, err := s.source.FetchPage(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("fetch management company page: %w", err)
-	}
-	if errValidate := ValidateSourcePage(page); errValidate != nil {
-		return nil, fmt.Errorf("validate management company page: %w", errValidate)
+	page, sourceHash, errPage := s.fetchManagementCompanyPage(ctx)
+	if errPage != nil {
+		return nil, errPage
 	}
 
-	sourceHash, err := SnapshotSourceHash(page.Snapshot)
-	if err != nil {
-		return nil, fmt.Errorf("calculate management company snapshot source hash: %w", err)
-	}
-
-	result := &SyncResult{SourceHash: sourceHash}
+	var result *SyncResult
 
 	errUpdate := s.state.Update(func(current *appstate.State) (*appstate.State, error) {
-		existingHistory, errHistory := s.repository.LoadDailyValues(ctx)
-		if errHistory != nil {
-			return nil, errHistory
-		}
+		var fundState *appstate.FundState
+		var errApply error
 
-		changes, conflicts := planDailyValueChanges(page.History, existingHistory)
-		observedAt := s.now().UTC()
-
-		snapshotCreated, fundState, errApply := s.repository.ApplyManagementCompanySync(ctx, changes, page.Snapshot, sourceHash, observedAt)
+		result, fundState, errApply = s.applyManagementCompanyPage(ctx, page, sourceHash)
 		if errApply != nil {
 			return nil, errApply
 		}
 
-		result.HistoryInserted = len(changes.Insert)
-		result.HistoryUpdated = len(changes.Update)
-		result.HistoryConflicts = conflicts
-		result.SnapshotCreated = snapshotCreated
-
-		if len(changes.Insert) == 0 && len(changes.Update) == 0 && !snapshotCreated {
-			if current == nil {
-				return nil, fmt.Errorf("management company sync persisted no state")
-			}
+		if result.HistoryInserted == 0 && result.HistoryUpdated == 0 && !result.SnapshotCreated {
 			return current, nil
 		}
 		if fundState == nil {
 			return nil, fmt.Errorf("management company sync returned no fund state after changes")
 		}
 
-		next := &appstate.State{}
-		if current != nil {
-			next = new(*current)
-		}
+		next := new(*current)
 		next.Fund = fundState
 
 		return next, nil
@@ -159,6 +146,50 @@ func (s *Service) SyncManagementCompany(ctx context.Context) (*SyncResult, error
 	}
 
 	return result, nil
+}
+
+func (s *Service) fetchManagementCompanyPage(ctx context.Context) (*SourcePage, string, error) {
+	if s.source == nil {
+		return nil, "", fmt.Errorf("management company source is not configured")
+	}
+
+	page, err := s.source.FetchPage(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("fetch management company page: %w", err)
+	}
+	if errValidate := ValidateSourcePage(page); errValidate != nil {
+		return nil, "", fmt.Errorf("validate management company page: %w", errValidate)
+	}
+
+	sourceHash, err := SnapshotSourceHash(page.Snapshot)
+	if err != nil {
+		return nil, "", fmt.Errorf("calculate management company snapshot source hash: %w", err)
+	}
+
+	return page, sourceHash, nil
+}
+
+func (s *Service) applyManagementCompanyPage(ctx context.Context, page *SourcePage, sourceHash string) (*SyncResult, *appstate.FundState, error) {
+	existingHistory, errHistory := s.repository.LoadDailyValues(ctx)
+	if errHistory != nil {
+		return nil, nil, errHistory
+	}
+
+	changes, conflicts := planDailyValueChanges(page.History, existingHistory)
+	observedAt := s.now().UTC()
+
+	snapshotCreated, fundState, errApply := s.repository.ApplyManagementCompanySync(ctx, changes, page.Snapshot, sourceHash, observedAt)
+	if errApply != nil {
+		return nil, nil, errApply
+	}
+
+	return &SyncResult{
+		SourceHash:       sourceHash,
+		HistoryInserted:  len(changes.Insert),
+		HistoryUpdated:   len(changes.Update),
+		HistoryConflicts: conflicts,
+		SnapshotCreated:  snapshotCreated,
+	}, fundState, nil
 }
 
 func planDailyValueChanges(

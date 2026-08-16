@@ -46,16 +46,16 @@ func TestProviderFetchParsesCompactSparkResponse(t *testing.T) {
 	}`)}}
 
 	provider := newProvider(client, 20, 0)
-	result, err := provider.Fetch(context.Background(), []string{" azn.l "})
+	result, err := provider.fetch(context.Background(), []string{"AZN.L"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	quote := result.Quotes["AZN.L"]
-	if quote.Price != "12632.0" || quote.PreviousClose != "12720.0" || quote.Currency != "GBp" {
+	if quote.Price != "12632.0" || quote.Currency != "GBp" {
 		t.Fatalf("quote = %#v", quote)
 	}
-	if quote.RegularMarketTime.IsZero() || quote.ExchangeTimezoneName != "Europe/London" {
+	if quote.RegularMarketTime.IsZero() {
 		t.Fatalf("quote metadata = %#v", quote)
 	}
 	if len(result.Missing) != 0 || len(result.Unexpected) != 0 || len(result.Duplicates) != 0 {
@@ -89,7 +89,7 @@ func TestProviderFetchReportsMissingUnexpectedAndDuplicateSymbols(t *testing.T) 
 	}`)}}
 
 	provider := newProvider(client, 20, 0)
-	result, err := provider.Fetch(context.Background(), []string{"AAPL", "KO"})
+	result, err := provider.fetch(context.Background(), []string{"AAPL", "KO"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestProviderFetchKeepsInvalidPerSymbolPriceForServiceValidation(t *testing.
 	}`)}}
 
 	provider := newProvider(client, 20, 0)
-	result, err := provider.Fetch(context.Background(), []string{"BAD"})
+	result, err := provider.fetch(context.Background(), []string{"BAD"})
 	if err != nil {
 		t.Fatal(err)
 	}

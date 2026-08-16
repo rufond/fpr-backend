@@ -9,13 +9,13 @@ import (
 
 var _ prices.YahooSource = (*Provider)(nil)
 
-func (p *Provider) FetchPrices(ctx context.Context, symbols []string) (*prices.YahooSourceResult, error) {
-	fetched, err := p.Fetch(ctx, symbols)
+func (p *Provider) FetchPrices(ctx context.Context, symbols []string) (prices.YahooSourceResult, error) {
+	fetched, err := p.fetch(ctx, symbols)
 	if err != nil {
-		return nil, err
+		return prices.YahooSourceResult{}, err
 	}
 
-	result := &prices.YahooSourceResult{
+	result := prices.YahooSourceResult{
 		RequestedSymbols: fetched.RequestedSymbols,
 		ReturnedSymbols:  fetched.ReturnedSymbols,
 		Batches:          fetched.Batches,
@@ -25,49 +25,30 @@ func (p *Provider) FetchPrices(ctx context.Context, symbols []string) (*prices.Y
 		Duplicates:       slices.Clone(fetched.Duplicates),
 	}
 
-	normalizedQuotes := make(map[string]prices.YahooSourceQuote, len(fetched.Quotes))
-	invalidQuotes := make(map[string]struct{})
-
 	for _, requested := range symbols {
-		symbol := normalizeSymbol(requested)
-
-		quote, exists := fetched.Quotes[symbol]
+		quoteObject, exists := fetched.Quotes[requested]
 		if !exists {
 			result.MissingRequests++
+
 			continue
 		}
 
-		if normalized, exists := normalizedQuotes[symbol]; exists {
-			result.QuotesByRequest[requested] = normalized
-			continue
-		}
-
-		if _, invalid := invalidQuotes[symbol]; invalid {
-			result.InvalidRequests++
-			continue
-		}
-
-		normalized, errNormalize := NormalizeCurrentQuote(quote)
+		normalized, errNormalize := normalizeCurrentQuote(quoteObject)
 		if errNormalize != nil {
-			issue := prices.YahooQuoteIssue{
-				Symbol: symbol,
+			result.Invalid = append(result.Invalid, prices.YahooQuoteIssue{
+				Symbol: requested,
 				Error:  errNormalize.Error(),
-			}
-			invalidQuotes[symbol] = struct{}{}
-			result.Invalid = append(result.Invalid, issue)
+			})
 			result.InvalidRequests++
 
 			continue
 		}
 
-		price := prices.YahooSourceQuote{
+		result.QuotesByRequest[requested] = prices.YahooSourceQuote{
 			UnitValue: normalized.UnitValue,
 			Currency:  normalized.Currency,
 			PricedAt:  normalized.PricedAt,
 		}
-
-		normalizedQuotes[symbol] = price
-		result.QuotesByRequest[requested] = price
 	}
 
 	return result, nil

@@ -25,8 +25,8 @@ type Service struct {
 
 func NewService(login string, passwordHash string) *Service {
 	return &Service{
-		login:        strings.TrimSpace(login),
-		passwordHash: []byte(strings.TrimSpace(passwordHash)),
+		login:        login,
+		passwordHash: []byte(passwordHash),
 		sessions:     make(map[string]struct{}),
 	}
 }
@@ -57,14 +57,10 @@ func (s *Service) Logout(token string) {
 }
 
 func (s *Service) ResolveUser(token string) *routes.User {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return nil
-	}
-
 	s.mu.RLock()
 	_, exists := s.sessions[token]
 	s.mu.RUnlock()
+
 	if !exists {
 		return nil
 	}

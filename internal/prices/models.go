@@ -17,12 +17,13 @@ const (
 )
 
 type Source interface {
-	FetchFundUnitQuote(ctx context.Context) (*SourceQuote, error)
+	FetchFundUnitQuote(ctx context.Context) (SourceQuote, error)
 	FetchFundUnitDailyPrices(ctx context.Context, from time.Time) ([]SourceDailyPrice, error)
 }
 
 type YahooSource interface {
-	FetchPrices(ctx context.Context, symbols []string) (*YahooSourceResult, error)
+	FetchPrices(ctx context.Context, symbols []string) (YahooSourceResult, error)
+	ResolveSymbols(ctx context.Context, isins []string) (YahooSymbolResolutionResult, error)
 }
 
 type SourceQuote struct {
@@ -82,6 +83,21 @@ type YahooSourceResult struct {
 	Invalid    []YahooQuoteIssue
 }
 
+type YahooSymbolResolutionResult struct {
+	RequestedISINs int
+	SymbolsByISIN  map[string]string
+	MissingISINs   []string
+}
+
+type YahooSourceDiscoveryResult struct {
+	CandidateInstruments int
+	ExistingSources      int
+	RequestedISINs       int
+	ResolvedISINs        int
+	CreatedSources       int
+	MissingISINs         []string
+}
+
 type YahooSyncResult struct {
 	ExpectedSources  int
 	RequestedSymbols int
@@ -110,6 +126,11 @@ type yahooPriceSource struct {
 	PriceSourceID  int64  `db:"price_source_id"`
 	InstrumentID   int64  `db:"instrument_id"`
 	ProviderSymbol string `db:"provider_symbol"`
+}
+
+type yahooSourceMapping struct {
+	InstrumentID   int64
+	ProviderSymbol string
 }
 
 type yahooQuoteToApply struct {

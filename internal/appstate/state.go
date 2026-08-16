@@ -187,6 +187,10 @@ func (m *Manager) Update(update func(current *State) (*State, error)) error {
 	defer m.writeMu.Unlock()
 
 	current := m.current.Load()
+	if current == nil {
+		return fmt.Errorf("application state is not initialized")
+	}
+
 	next, err := update(current)
 	if err != nil {
 		return err

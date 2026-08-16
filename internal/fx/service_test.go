@@ -11,11 +11,11 @@ import (
 )
 
 type fakeSource struct {
-	rate *SourceRate
+	rate SourceRate
 	err  error
 }
 
-func (s fakeSource) FetchRate(context.Context, string, string) (*SourceRate, error) {
+func (s fakeSource) FetchUSDRUB(context.Context) (SourceRate, error) {
 	return s.rate, s.err
 }
 
@@ -94,7 +94,7 @@ func TestSyncUSDRUBPublishesRAMOnlyAfterRepositorySuccess(t *testing.T) {
 	}}
 	service := NewService(
 		fakeRepository{changed: true, state: nextFX, rate: currentRate},
-		fakeSource{rate: &SourceRate{
+		fakeSource{rate: SourceRate{
 			Provider:      ProviderMOEX,
 			BaseCurrency:  currency.USD,
 			QuoteCurrency: currency.RUB,
@@ -137,7 +137,7 @@ func TestSyncUSDRUBNoopKeepsApplicationStatePointer(t *testing.T) {
 			Rate:          "79.125",
 			PricedAt:      pricedAt,
 		}},
-		fakeSource{rate: &SourceRate{
+		fakeSource{rate: SourceRate{
 			Provider:      ProviderMOEX,
 			BaseCurrency:  currency.USD,
 			QuoteCurrency: currency.RUB,
@@ -171,7 +171,7 @@ func TestSyncUSDRUBKeepsRAMOnRepositoryError(t *testing.T) {
 
 	service := NewService(
 		fakeRepository{err: errors.New("write failed")},
-		fakeSource{rate: &SourceRate{
+		fakeSource{rate: SourceRate{
 			Provider:      ProviderMOEX,
 			BaseCurrency:  currency.USD,
 			QuoteCurrency: currency.RUB,

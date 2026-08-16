@@ -139,6 +139,27 @@ func TestEnsureInitializedSyncsWhenPersistentStateIsEmpty(t *testing.T) {
 	}
 }
 
+func TestEnsureInitializedDoesNotPublishRAMStateWhenInitialSyncFails(t *testing.T) {
+	t.Parallel()
+
+	persistErr := errors.New("persist failed")
+	repository := &fakeServiceRepository{
+		fundStateResults: []fakeFundStateResult{{err: ErrFundStateNotFound}},
+		existing:         map[string]StoredDailyValue{},
+		applyErr:         persistErr,
+	}
+	state := appstate.NewManager()
+	service := NewService(repository, &fakeManagementCompanySource{page: testSourcePageForSync()}, state)
+
+	_, err := service.EnsureInitialized(context.Background())
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("EnsureInitialized() error = %v, want %v", err, persistErr)
+	}
+	if state.Load() != nil {
+		t.Fatal("RAM state initialized after failed persistence")
+	}
+}
+
 func TestSyncManagementCompanyPersistsThenPublishesRAMState(t *testing.T) {
 	t.Parallel()
 

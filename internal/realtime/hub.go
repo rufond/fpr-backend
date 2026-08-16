@@ -1,12 +1,10 @@
 package realtime
 
 import (
-	"cmp"
 	"context"
 	"crypto/rand"
 	"net/http"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -116,19 +114,14 @@ func (h *Hub) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (h *Hub) Publish(update Update) {
-	scopes := normalizeScopes(update.Scopes)
-	if len(scopes) == 0 {
+	if len(update.Scopes) == 0 {
 		return
 	}
 
-	instrumentPrices := normalizeInstrumentPrices(update.InstrumentPrices)
-	fxRates := normalizeFXRates(update.FXRates)
-	instrumentIDs := make([]int64, 0, len(update.InstrumentIDs)+len(instrumentPrices))
-	instrumentIDs = append(instrumentIDs, update.InstrumentIDs...)
-	for _, price := range instrumentPrices {
+	instrumentIDs := slices.Clone(update.InstrumentIDs)
+	for _, price := range update.InstrumentPrices {
 		instrumentIDs = append(instrumentIDs, price.InstrumentID)
 	}
-	instrumentIDs = normalizeInstrumentIDs(instrumentIDs)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -144,10 +137,10 @@ func (h *Hub) Publish(update Update) {
 		GenerationID:     h.generationID,
 		Revision:         h.revision,
 		OccurredAt:       time.Now().UTC(),
-		Scopes:           scopes,
+		Scopes:           slices.Clone(update.Scopes),
 		InstrumentIDs:    instrumentIDs,
-		InstrumentPrices: instrumentPrices,
-		FXRates:          fxRates,
+		InstrumentPrices: slices.Clone(update.InstrumentPrices),
+		FXRates:          slices.Clone(update.FXRates),
 	}
 
 	for subscriber := range h.clients {
@@ -211,77 +204,4 @@ func (h *Hub) unregister(subscriber *client) {
 
 	delete(h.clients, subscriber)
 	close(subscriber.events)
-}
-
-func normalizeScopes(scopes []string) []string {
-	result := slices.DeleteFunc(slices.Clone(scopes), func(scope string) bool {
-		return scope == ""
-	})
-	slices.Sort(result)
-	return slices.Compact(result)
-}
-
-func normalizeInstrumentIDs(ids []int64) []int64 {
-	result := slices.DeleteFunc(slices.Clone(ids), func(id int64) bool {
-		return id <= 0
-	})
-	slices.Sort(result)
-	return slices.Compact(result)
-}
-
-func normalizeInstrumentPrices(prices []InstrumentPriceDelta) []InstrumentPriceDelta {
-	byInstrument := make(map[int64]InstrumentPriceDelta, len(prices))
-	for _, price := range prices {
-		if price.InstrumentID <= 0 {
-			continue
-		}
-
-		price.PricedAt = price.PricedAt.UTC()
-		byInstrument[price.InstrumentID] = price
-	}
-
-	result := make([]InstrumentPriceDelta, 0, len(byInstrument))
-	for _, price := range byInstrument {
-		result = append(result, price)
-	}
-
-	slices.SortFunc(result, func(left, right InstrumentPriceDelta) int {
-		return cmp.Compare(left.InstrumentID, right.InstrumentID)
-	})
-
-	return result
-}
-
-func normalizeFXRates(rates []FXRateDelta) []FXRateDelta {
-	type pair struct {
-		base  string
-		quote string
-	}
-
-	byPair := make(map[pair]FXRateDelta, len(rates))
-	for _, rate := range rates {
-		rate.BaseCurrency = strings.ToUpper(strings.TrimSpace(rate.BaseCurrency))
-		rate.QuoteCurrency = strings.ToUpper(strings.TrimSpace(rate.QuoteCurrency))
-		rate.Rate = strings.TrimSpace(rate.Rate)
-		if rate.BaseCurrency == "" || rate.QuoteCurrency == "" || rate.Rate == "" {
-			continue
-		}
-
-		rate.PricedAt = rate.PricedAt.UTC()
-		byPair[pair{base: rate.BaseCurrency, quote: rate.QuoteCurrency}] = rate
-	}
-
-	result := make([]FXRateDelta, 0, len(byPair))
-	for _, rate := range byPair {
-		result = append(result, rate)
-	}
-
-	slices.SortFunc(result, func(left, right FXRateDelta) int {
-		if byBase := cmp.Compare(left.BaseCurrency, right.BaseCurrency); byBase != 0 {
-			return byBase
-		}
-		return cmp.Compare(left.QuoteCurrency, right.QuoteCurrency)
-	})
-
-	return result
 }

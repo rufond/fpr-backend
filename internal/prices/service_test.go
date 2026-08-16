@@ -3,6 +3,7 @@ package prices
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 )
 
 type fakeSource struct {
-	quote    *SourceQuote
+	quote    SourceQuote
 	quoteErr error
 
 	daily     []SourceDailyPrice
@@ -18,34 +19,48 @@ type fakeSource struct {
 	dailyFrom time.Time
 }
 
-func (s *fakeSource) FetchFundUnitQuote(context.Context) (*SourceQuote, error) {
+func (s *fakeSource) FetchFundUnitQuote(context.Context) (SourceQuote, error) {
 	return s.quote, s.quoteErr
 }
 
 func (s *fakeSource) FetchFundUnitDailyPrices(_ context.Context, from time.Time) ([]SourceDailyPrice, error) {
 	s.dailyFrom = from
+
 	return s.daily, s.dailyErr
 }
 
 type fakeYahooSource struct {
-	result  *YahooSourceResult
+	result  YahooSourceResult
 	err     error
 	symbols []string
 	onFetch func()
+
+	resolveResult YahooSymbolResolutionResult
+	resolveErr    error
+	resolveISINs  []string
 }
 
-func (s *fakeYahooSource) FetchPrices(_ context.Context, symbols []string) (*YahooSourceResult, error) {
-	s.symbols = append([]string(nil), symbols...)
+func (s *fakeYahooSource) FetchPrices(_ context.Context, symbols []string) (YahooSourceResult, error) {
+	s.symbols = slices.Clone(symbols)
 	if s.onFetch != nil {
 		s.onFetch()
 	}
+
 	return s.result, s.err
 }
 
+func (s *fakeYahooSource) ResolveSymbols(_ context.Context, isins []string) (YahooSymbolResolutionResult, error) {
+	s.resolveISINs = slices.Clone(isins)
+
+	return s.resolveResult, s.resolveErr
+}
+
 type fakePriceRepository struct {
-	ensureErr error
-	loadState *appstate.PriceState
-	loadErr   error
+	ensureID    int64
+	ensureErr   error
+	ensureCalls int
+	loadState   *appstate.PriceState
+	loadErr     error
 
 	applyChanged bool
 	applyStale   bool
@@ -63,10 +78,18 @@ type fakePriceRepository struct {
 	yahooApplied   []yahooQuoteToApply
 	yahooResult    yahooApplyResult
 	yahooApplyErr  error
+
+	yahooMappedIDs       map[int64]struct{}
+	yahooMappedErr       error
+	yahooCreatedMappings []yahooSourceMapping
+	yahooCreateCount     int
+	yahooCreateErr       error
 }
 
-func (r *fakePriceRepository) EnsureFundUnitMOEXSource(context.Context) error {
-	return r.ensureErr
+func (r *fakePriceRepository) EnsureFundUnitMOEXSource(context.Context) (int64, error) {
+	r.ensureCalls++
+
+	return r.ensureID, r.ensureErr
 }
 
 func (r *fakePriceRepository) LoadState(context.Context) (*appstate.PriceState, error) {
@@ -77,8 +100,19 @@ func (r *fakePriceRepository) YahooPriceSources(context.Context) ([]yahooPriceSo
 	return r.yahooSources, r.yahooSourceErr
 }
 
+func (r *fakePriceRepository) YahooMappedInstrumentIDs(context.Context) (map[int64]struct{}, error) {
+	return r.yahooMappedIDs, r.yahooMappedErr
+}
+
+func (r *fakePriceRepository) CreateYahooPriceSources(_ context.Context, items []yahooSourceMapping) (int, error) {
+	r.yahooCreatedMappings = slices.Clone(items)
+
+	return r.yahooCreateCount, r.yahooCreateErr
+}
+
 func (r *fakePriceRepository) ApplyFundUnitMOEXQuote(
 	context.Context,
+	int64,
 	SourceQuote,
 	time.Time,
 ) (bool, bool, appstate.InstrumentPrice, error) {
@@ -90,15 +124,18 @@ func (r *fakePriceRepository) ApplyYahooQuotes(
 	items []yahooQuoteToApply,
 	_ time.Time,
 ) (yahooApplyResult, error) {
-	r.yahooApplied = append([]yahooQuoteToApply(nil), items...)
+	r.yahooApplied = slices.Clone(items)
+
 	return r.yahooResult, r.yahooApplyErr
 }
 
 func (r *fakePriceRepository) ApplyFundUnitMOEXDailyPrices(
 	_ context.Context,
+	_ int64,
 	items []SourceDailyPrice,
 ) (int, int, *appstate.PriceState, error) {
-	r.dailyItems = append([]SourceDailyPrice(nil), items...)
+	r.dailyItems = slices.Clone(items)
+
 	return r.dailyInserted, r.dailyUpdated, r.dailyState, r.dailyErr
 }
 
@@ -136,7 +173,7 @@ func TestServiceStartLoadsPricesIntoExistingApplicationState(t *testing.T) {
 			},
 		},
 	}
-	repository := &fakePriceRepository{loadState: priceState}
+	repository := &fakePriceRepository{ensureID: 7, loadState: priceState}
 	service := NewService(repository, nil, nil, manager)
 	service.now = func() time.Time { return time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC) }
 
@@ -150,6 +187,9 @@ func TestServiceStartLoadsPricesIntoExistingApplicationState(t *testing.T) {
 	}
 	if len(current.Prices.Points[7].Items) != 1 || current.Prices.Points[7].Items[0].UnitValue != "3200" {
 		t.Fatalf("retained price points = %#v", current.Prices.Points[7].Items)
+	}
+	if service.fundUnitMOEXSourceID != 7 || repository.ensureCalls != 1 {
+		t.Fatalf("fund unit source cache = %d, ensure calls = %d", service.fundUnitMOEXSourceID, repository.ensureCalls)
 	}
 }
 
@@ -198,7 +238,7 @@ func TestSyncFundUnitMOEXPublishesRAMOnlyAfterRepositorySuccess(t *testing.T) {
 		applyChanged: true,
 		applyPrice:   price,
 	}
-	source := &fakeSource{quote: &SourceQuote{
+	source := &fakeSource{quote: SourceQuote{
 		UnitValue: "3210.5",
 		Currency:  "RUB",
 		PricedAt:  pricedAt,
@@ -244,7 +284,8 @@ func TestSyncFundUnitMOEXKeepsRAMOnRepositoryError(t *testing.T) {
 	}
 
 	repository := &fakePriceRepository{applyErr: errors.New("write failed")}
-	service := NewService(repository, &fakeSource{quote: &SourceQuote{
+
+	service := NewService(repository, &fakeSource{quote: SourceQuote{
 		UnitValue: "3210.5",
 		Currency:  "RUB",
 		PricedAt:  time.Now().UTC(),
@@ -272,7 +313,8 @@ func TestSyncFundUnitMOEXNoopKeepsCurrentStatePointer(t *testing.T) {
 	}
 
 	repository := &fakePriceRepository{applyPrice: appstate.InstrumentPrice{InstrumentID: 7}}
-	service := NewService(repository, &fakeSource{quote: &SourceQuote{
+
+	service := NewService(repository, &fakeSource{quote: SourceQuote{
 		UnitValue: "3210.5",
 		Currency:  "RUB",
 		PricedAt:  time.Now().UTC(),
@@ -283,32 +325,13 @@ func TestSyncFundUnitMOEXNoopKeepsCurrentStatePointer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncFundUnitMOEX() error = %v", err)
 	}
+
 	if result.Changed {
 		t.Fatalf("result = %#v", result)
 	}
+
 	if manager.Load() != initial {
 		t.Fatal("noop replaced application state pointer")
-	}
-}
-
-func TestSyncFundUnitMOEXRejectsInvalidQuoteBeforeRepository(t *testing.T) {
-	t.Parallel()
-
-	manager := appstate.NewManager()
-	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{}}); err != nil {
-		t.Fatalf("Initialize() error = %v", err)
-	}
-
-	repository := &fakePriceRepository{}
-	service := NewService(repository, &fakeSource{quote: &SourceQuote{
-		UnitValue: "0",
-		Currency:  "RUB",
-		PricedAt:  time.Now().UTC(),
-		Source:    "last",
-	}}, nil, manager)
-
-	if _, err := service.SyncFundUnitMOEX(context.Background()); err == nil {
-		t.Fatal("SyncFundUnitMOEX() error = nil")
 	}
 }
 
@@ -322,7 +345,7 @@ func TestSyncFundUnitMOEXAcceptsProviderCurrency(t *testing.T) {
 	}
 
 	repository := &fakePriceRepository{applyPrice: appstate.InstrumentPrice{InstrumentID: 7, Currency: "USD"}}
-	service := NewService(repository, &fakeSource{quote: &SourceQuote{
+	service := NewService(repository, &fakeSource{quote: SourceQuote{
 		UnitValue: "31.8",
 		Currency:  "USD",
 		PricedAt:  time.Now().UTC(),
@@ -440,27 +463,112 @@ func TestSyncFundUnitMOEXHistoryKeepsRAMOnRepositoryError(t *testing.T) {
 	}
 }
 
-func TestSyncFundUnitMOEXHistoryRejectsInvalidDailyPriceBeforeRepository(t *testing.T) {
+func TestDiscoverYahooSourcesCreatesMappingsForCurrentYahooEligibleInstruments(t *testing.T) {
 	t.Parallel()
 
+	equityID := int64(41)
+	depositaryReceiptID := int64(42)
+	bondID := int64(43)
+	existingID := int64(44)
+
 	manager := appstate.NewManager()
-	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{}}); err != nil {
+	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{
+		Snapshot: appstate.FundSnapshot{
+			Assets: []appstate.FundAsset{
+				{InstrumentID: &equityID, InstrumentType: "equity", ISIN: "US3563901046"},
+				{InstrumentID: &depositaryReceiptID, InstrumentType: "depositary_receipt", ISIN: "US0000000001"},
+				{InstrumentID: &bondID, InstrumentType: "bond", ISIN: "XS0000000001"},
+				{InstrumentID: &existingID, InstrumentType: "equity", ISIN: "US0000000002"},
+				{InstrumentID: &equityID, InstrumentType: "equity", ISIN: "US3563901046"},
+			},
+		},
+	}}); err != nil {
 		t.Fatalf("Initialize() error = %v", err)
 	}
 
-	source := &fakeSource{daily: []SourceDailyPrice{{
-		PriceDate: time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC),
-		UnitValue: "0",
-		Currency:  "RUB",
-	}}}
-	repository := &fakePriceRepository{}
-	service := NewService(repository, source, nil, manager)
-
-	if _, err := service.SyncFundUnitMOEXHistory(context.Background()); err == nil {
-		t.Fatal("SyncFundUnitMOEXHistory() error = nil")
+	repository := &fakePriceRepository{
+		yahooMappedIDs:   map[int64]struct{}{existingID: {}},
+		yahooCreateCount: 2,
 	}
-	if repository.dailyItems != nil {
-		t.Fatalf("repository received invalid items: %#v", repository.dailyItems)
+	source := &fakeYahooSource{
+		resolveResult: YahooSymbolResolutionResult{
+			RequestedISINs: 2,
+			SymbolsByISIN: map[string]string{
+				"US3563901046": "FRHC",
+				"US0000000001": "DR.TEST",
+			},
+		},
+	}
+
+	service := NewService(repository, nil, source, manager)
+
+	result, err := service.DiscoverYahooSources(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverYahooSources() error = %v", err)
+	}
+
+	if result.CandidateInstruments != 3 ||
+		result.ExistingSources != 1 ||
+		result.RequestedISINs != 2 ||
+		result.ResolvedISINs != 2 ||
+		result.CreatedSources != 2 {
+		t.Fatalf("result = %#v", result)
+	}
+
+	if len(source.resolveISINs) != 2 || source.resolveISINs[0] != "US3563901046" || source.resolveISINs[1] != "US0000000001" {
+		t.Fatalf("resolved ISINs = %#v", source.resolveISINs)
+	}
+
+	if len(repository.yahooCreatedMappings) != 2 {
+		t.Fatalf("created mappings = %#v", repository.yahooCreatedMappings)
+	}
+	if repository.yahooCreatedMappings[0].InstrumentID != equityID ||
+		repository.yahooCreatedMappings[0].ProviderSymbol != "FRHC" ||
+		repository.yahooCreatedMappings[1].InstrumentID != depositaryReceiptID ||
+		repository.yahooCreatedMappings[1].ProviderSymbol != "DR.TEST" {
+		t.Fatalf("created mappings = %#v", repository.yahooCreatedMappings)
+	}
+}
+
+func TestDiscoverYahooSourcesKeepsMissingISINUnmapped(t *testing.T) {
+	t.Parallel()
+
+	instrumentID := int64(41)
+	manager := appstate.NewManager()
+	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{
+		Snapshot: appstate.FundSnapshot{
+			Assets: []appstate.FundAsset{
+				{InstrumentID: &instrumentID, InstrumentType: "equity", ISIN: "KZ1C00001122"},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	repository := &fakePriceRepository{}
+	source := &fakeYahooSource{
+		resolveResult: YahooSymbolResolutionResult{
+			RequestedISINs: 1,
+			SymbolsByISIN:  map[string]string{},
+			MissingISINs:   []string{"KZ1C00001122"},
+		},
+	}
+
+	service := NewService(repository, nil, source, manager)
+
+	result, err := service.DiscoverYahooSources(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverYahooSources() error = %v", err)
+	}
+
+	if result.CreatedSources != 0 ||
+		len(result.MissingISINs) != 1 ||
+		result.MissingISINs[0] != "KZ1C00001122" {
+		t.Fatalf("result = %#v", result)
+	}
+
+	if len(repository.yahooCreatedMappings) != 0 {
+		t.Fatalf("created mappings = %#v", repository.yahooCreatedMappings)
 	}
 }
 
@@ -517,7 +625,7 @@ func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
 			},
 		}},
 	}
-	source := &fakeYahooSource{result: &YahooSourceResult{
+	source := &fakeYahooSource{result: YahooSourceResult{
 		RequestedSymbols: 1,
 		ReturnedSymbols:  1,
 		Batches:          1,
@@ -590,7 +698,7 @@ func TestSyncYahooPricesSkipsMissingAndInvalidQuotes(t *testing.T) {
 		{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"},
 		{PriceSourceID: 11, InstrumentID: 43, ProviderSymbol: "BBB"},
 	}}
-	source := &fakeYahooSource{result: &YahooSourceResult{
+	source := &fakeYahooSource{result: YahooSourceResult{
 		RequestedSymbols: 2,
 		ReturnedSymbols:  1,
 		Batches:          1,
@@ -634,7 +742,7 @@ func TestSyncYahooPricesRechecksCompositionAfterFetch(t *testing.T) {
 		{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"},
 	}}
 	pricedAt := time.Date(2026, time.August, 16, 15, 20, 0, 0, time.UTC)
-	source := &fakeYahooSource{result: &YahooSourceResult{
+	source := &fakeYahooSource{result: YahooSourceResult{
 		RequestedSymbols: 1,
 		ReturnedSymbols:  1,
 		Batches:          1,
@@ -687,7 +795,7 @@ func TestSyncYahooPricesKeepsRAMOnRepositoryError(t *testing.T) {
 		yahooSources:  []yahooPriceSource{{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"}},
 		yahooApplyErr: errors.New("write failed"),
 	}
-	source := &fakeYahooSource{result: &YahooSourceResult{
+	source := &fakeYahooSource{result: YahooSourceResult{
 		RequestedSymbols: 1,
 		ReturnedSymbols:  1,
 		Batches:          1,

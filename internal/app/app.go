@@ -55,6 +55,12 @@ func New(d *deps.Deps) *App {
 		schedulerjobs.MOEXUSDRUBSync(fxModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobYahooSourcesDiscovery,
+		"Yahoo source discovery",
+		"5 * * * *",
+		schedulerjobs.YahooSourcesDiscovery(priceModule.Service),
+	)
+	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobYahooPricesSync,
 		"Yahoo prices sync",
 		"* * * * *",
@@ -150,15 +156,11 @@ func (a *App) Routes() []routes.Route {
 			Handler:      a.scheduler.Handler.RunJob,
 		},
 		{
-			Method:  http.MethodGet,
-			Path:    "/healthz",
-			Handler: health,
+			Method: http.MethodGet,
+			Path:   "/healthz",
+			Handler: func(_ routes.Request) (int, error, any) {
+				return http.StatusOK, nil, map[string]any{"status": "ok"}
+			},
 		},
-	}
-}
-
-func health(_ routes.Request) (int, error, any) {
-	return http.StatusOK, nil, map[string]any{
-		"status": "ok",
 	}
 }

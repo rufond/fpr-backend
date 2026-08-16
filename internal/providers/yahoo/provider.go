@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	DefaultBatchSize    = 20
-	DefaultTimeout      = 30 * time.Second
-	DefaultRequestDelay = time.Second
+	defaultBatchSize    = 20
+	defaultTimeout      = 30 * time.Second
+	defaultRequestDelay = time.Second
 
 	yahooSparkURL   = "https://query1.finance.yahoo.com/v7/finance/spark"
 	maxResponseSize = 16 << 20
@@ -37,23 +37,19 @@ type Provider struct {
 	requestDelay time.Duration
 }
 
-type Quote struct {
-	Symbol               string
-	Currency             string
-	Price                string
-	PreviousClose        string
-	RegularMarketTime    time.Time
-	ExchangeTimezoneName string
-	ExchangeName         string
-	InstrumentType       string
+type quote struct {
+	Symbol            string
+	Currency          string
+	Price             string
+	RegularMarketTime time.Time
 }
 
-type FetchResult struct {
+type fetchResult struct {
 	RequestedSymbols int
 	ReturnedSymbols  int
 	Batches          int
 
-	Quotes map[string]Quote
+	Quotes map[string]quote
 
 	Missing    []string
 	Unexpected []string
@@ -61,14 +57,14 @@ type FetchResult struct {
 }
 
 type decimalNumber struct {
-	Text  string
-	Valid bool
+	Text string
 }
 
 func (n *decimalNumber) UnmarshalJSON(data []byte) error {
 	raw := strings.TrimSpace(string(data))
 	if raw == "" || raw == "null" {
 		*n = decimalNumber{}
+
 		return nil
 	}
 
@@ -81,9 +77,7 @@ func (n *decimalNumber) UnmarshalJSON(data []byte) error {
 		raw = strings.TrimSpace(text)
 	}
 
-	_, valid := new(big.Rat).SetString(raw)
 	n.Text = raw
-	n.Valid = valid
 
 	return nil
 }
@@ -107,20 +101,15 @@ type sparkResponse struct {
 }
 
 type sparkMeta struct {
-	Currency             string        `json:"currency"`
-	Symbol               string        `json:"symbol"`
-	ExchangeName         string        `json:"exchangeName"`
-	InstrumentType       string        `json:"instrumentType"`
-	RegularMarketTime    int64         `json:"regularMarketTime"`
-	RegularMarketPrice   decimalNumber `json:"regularMarketPrice"`
-	PreviousClose        decimalNumber `json:"previousClose"`
-	ExchangeTimezoneName string        `json:"exchangeTimezoneName"`
+	Currency           string        `json:"currency"`
+	RegularMarketTime  int64         `json:"regularMarketTime"`
+	RegularMarketPrice decimalNumber `json:"regularMarketPrice"`
 }
 
 func NewProvider() (*Provider, error) {
 	client, err := tlsclient.NewHttpClient(
 		tlsclient.NewNoopLogger(),
-		tlsclient.WithTimeoutMilliseconds(int(DefaultTimeout.Milliseconds())),
+		tlsclient.WithTimeoutMilliseconds(int(defaultTimeout.Milliseconds())),
 		tlsclient.WithClientProfile(profiles.Chrome_146),
 		tlsclient.WithDisableHttp3(),
 	)
@@ -128,12 +117,12 @@ func NewProvider() (*Provider, error) {
 		return nil, fmt.Errorf("create Yahoo TLS client: %w", err)
 	}
 
-	return newProvider(client, DefaultBatchSize, DefaultRequestDelay), nil
+	return newProvider(client, defaultBatchSize, defaultRequestDelay), nil
 }
 
 func newProvider(client httpClient, batchSize int, requestDelay time.Duration) *Provider {
 	if batchSize < 1 {
-		batchSize = DefaultBatchSize
+		batchSize = defaultBatchSize
 	}
 
 	return &Provider{client: client, batchSize: batchSize, requestDelay: requestDelay}
@@ -147,20 +136,10 @@ func (p *Provider) Close() {
 	p.client.CloseIdleConnections()
 }
 
-func (p *Provider) Fetch(ctx context.Context, symbols []string) (*FetchResult, error) {
-	if p == nil || p.client == nil {
-		return nil, fmt.Errorf("Yahoo provider is not configured")
-	}
-
-	symbols = normalizeSymbols(symbols)
-
-	result := &FetchResult{
+func (p *Provider) fetch(ctx context.Context, symbols []string) (fetchResult, error) {
+	result := fetchResult{
 		RequestedSymbols: len(symbols),
-		Quotes:           make(map[string]Quote, len(symbols)),
-	}
-
-	if len(symbols) == 0 {
-		return result, nil
+		Quotes:           make(map[string]quote, len(symbols)),
 	}
 
 	requested := make(map[string]struct{}, len(symbols))
@@ -171,12 +150,12 @@ func (p *Provider) Fetch(ctx context.Context, symbols []string) (*FetchResult, e
 	duplicates := map[string]struct{}{}
 	unexpected := map[string]struct{}{}
 
-	batches := splitBatches(symbols, p.batchSize)
-
-	for batchIndex, batch := range batches {
+	batchCount := (len(symbols) + p.batchSize - 1) / p.batchSize
+	batchIndex := 0
+	for batch := range slices.Chunk(symbols, p.batchSize) {
 		items, returned, errFetch := p.fetchBatch(ctx, batch)
 		if errFetch != nil {
-			return nil, fmt.Errorf("fetch Yahoo batch %d/%d: %w", batchIndex+1, len(batches), errFetch)
+			return fetchResult{}, fmt.Errorf("fetch Yahoo batch %d/%d: %w", batchIndex+1, batchCount, errFetch)
 		}
 
 		result.Batches++
@@ -202,14 +181,10 @@ func (p *Provider) Fetch(ctx context.Context, symbols []string) (*FetchResult, e
 			result.Quotes[symbol] = item
 		}
 
-		if batchIndex+1 < len(batches) && p.requestDelay > 0 {
-			timer := time.NewTimer(p.requestDelay)
-
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, ctx.Err()
-			case <-timer.C:
+		batchIndex++
+		if batchIndex < batchCount {
+			if errDelay := p.waitRequestDelay(ctx); errDelay != nil {
+				return fetchResult{}, errDelay
 			}
 		}
 	}
@@ -220,13 +195,13 @@ func (p *Provider) Fetch(ctx context.Context, symbols []string) (*FetchResult, e
 		}
 	}
 
-	result.Unexpected = mapKeys(unexpected)
-	result.Duplicates = mapKeys(duplicates)
+	result.Unexpected = slices.Sorted(maps.Keys(unexpected))
+	result.Duplicates = slices.Sorted(maps.Keys(duplicates))
 
 	return result, nil
 }
 
-func (p *Provider) fetchBatch(ctx context.Context, symbols []string) ([]Quote, int, error) {
+func (p *Provider) fetchBatch(ctx context.Context, symbols []string) ([]quote, int, error) {
 	requestURL := buildURL(symbols)
 	req, errRequest := http.NewRequest(http.MethodGet, requestURL, nil)
 	if errRequest != nil {
@@ -264,28 +239,23 @@ func (p *Provider) fetchBatch(ctx context.Context, symbols []string) ([]Quote, i
 		return nil, 0, fmt.Errorf("Yahoo spark error: %s", strings.TrimSpace(string(envelope.Spark.Error)))
 	}
 
-	items := make([]Quote, 0, len(envelope.Spark.Result))
+	items := make([]quote, 0, len(envelope.Spark.Result))
 
 	for _, item := range envelope.Spark.Result {
-		quote := Quote{Symbol: item.Symbol}
+		quoteObject := quote{Symbol: item.Symbol}
 
 		if len(item.Response) > 0 {
 			meta := item.Response[0].Meta
 
-			quote.Symbol = firstNotEmpty(meta.Symbol, item.Symbol)
-			quote.Currency = strings.TrimSpace(meta.Currency)
-			quote.Price = meta.RegularMarketPrice.Text
-			quote.PreviousClose = meta.PreviousClose.Text
-			quote.ExchangeTimezoneName = strings.TrimSpace(meta.ExchangeTimezoneName)
-			quote.ExchangeName = strings.TrimSpace(meta.ExchangeName)
-			quote.InstrumentType = strings.TrimSpace(meta.InstrumentType)
+			quoteObject.Currency = strings.TrimSpace(meta.Currency)
+			quoteObject.Price = meta.RegularMarketPrice.Text
 
 			if meta.RegularMarketTime > 0 {
-				quote.RegularMarketTime = time.Unix(meta.RegularMarketTime, 0).UTC()
+				quoteObject.RegularMarketTime = time.Unix(meta.RegularMarketTime, 0).UTC()
 			}
 		}
 
-		items = append(items, quote)
+		items = append(items, quoteObject)
 	}
 
 	return items, len(envelope.Spark.Result), nil
@@ -335,41 +305,21 @@ func browserHeaders() http.Header {
 	}
 }
 
-func normalizeSymbols(symbols []string) []string {
-	result := make([]string, 0, len(symbols))
-	seen := make(map[string]struct{}, len(symbols))
-
-	for _, value := range symbols {
-		symbol := normalizeSymbol(value)
-		if symbol == "" {
-			continue
-		}
-
-		if _, exists := seen[symbol]; exists {
-			continue
-		}
-
-		seen[symbol] = struct{}{}
-
-		result = append(result, symbol)
-	}
-
-	return result
-}
-
 func normalizeSymbol(value string) string {
 	return strings.ToUpper(strings.TrimSpace(value))
 }
 
-func splitBatches(symbols []string, batchSize int) [][]string {
-	result := make([][]string, 0, (len(symbols)+batchSize-1)/batchSize)
-
-	for start := 0; start < len(symbols); start += batchSize {
-		end := min(start+batchSize, len(symbols))
-		result = append(result, symbols[start:end])
+func (p *Provider) waitRequestDelay(ctx context.Context) error {
+	if p.requestDelay <= 0 {
+		return nil
 	}
 
-	return result
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(p.requestDelay):
+		return nil
+	}
 }
 
 func readResponseBody(body io.Reader) ([]byte, error) {
@@ -392,25 +342,4 @@ func responsePreview(body []byte) string {
 	}
 
 	return text[:300] + "..."
-}
-
-func mapKeys(values map[string]struct{}) []string {
-	result := make([]string, 0, len(values))
-	for value := range values {
-		result = append(result, value)
-	}
-
-	slices.Sort(result)
-
-	return result
-}
-
-func firstNotEmpty(values ...string) string {
-	for _, value := range values {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
-	}
-
-	return ""
 }

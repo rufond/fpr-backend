@@ -71,6 +71,7 @@ func (p *Provider) Fetch(ctx context.Context) ([]byte, error) {
 
 	return body, nil
 }
+
 func (p *Provider) FetchPage(ctx context.Context) (*fund.SourcePage, error) {
 	body, err := p.Fetch(ctx)
 	if err != nil {

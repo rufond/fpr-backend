@@ -25,17 +25,6 @@ type priceQueryer interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-type storedInstrument struct {
-	ID        int64  `db:"id"`
-	AssetType string `db:"asset_type"`
-}
-
-type storedPriceSource struct {
-	ID             int64  `db:"id"`
-	ProviderSymbol string `db:"provider_symbol"`
-	Enabled        bool   `db:"enabled"`
-}
-
 type storedCurrentPrice struct {
 	UnitValue string    `db:"unit_value"`
 	Currency  string    `db:"currency"`
@@ -103,22 +92,23 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) EnsureFundUnitMOEXSource(ctx context.Context) error {
+func (r *Repository) EnsureFundUnitMOEXSource(ctx context.Context) (int64, error) {
 	tx, errBegin := r.db.Begin(ctx)
 	if errBegin != nil {
-		return fmt.Errorf("begin ensure fund unit MOEX price source transaction: %w", errBegin)
+		return 0, fmt.Errorf("begin ensure fund unit MOEX price source transaction: %w", errBegin)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, errEnsure := ensureFundUnitMOEXSource(ctx, tx); errEnsure != nil {
-		return errEnsure
+	priceSourceID, errEnsure := ensureFundUnitMOEXSource(ctx, tx)
+	if errEnsure != nil {
+		return 0, errEnsure
 	}
 
 	if errCommit := tx.Commit(ctx); errCommit != nil {
-		return fmt.Errorf("commit ensure fund unit MOEX price source transaction: %w", errCommit)
+		return 0, fmt.Errorf("commit ensure fund unit MOEX price source transaction: %w", errCommit)
 	}
 
-	return nil
+	return priceSourceID, nil
 }
 
 func (r *Repository) LoadState(ctx context.Context) (*appstate.PriceState, error) {
@@ -160,8 +150,78 @@ func (r *Repository) YahooPriceSources(ctx context.Context) ([]yahooPriceSource,
 	return stored, nil
 }
 
+func (r *Repository) YahooMappedInstrumentIDs(ctx context.Context) (map[int64]struct{}, error) {
+	sources := builder.NewTable("instrument_price_sources")
+
+	query := builder.NewSelect()
+	query.From(sources)
+	query.Column(builder.ColumnName{Table: sources, Name: "instrument_id"})
+	query.Where(builder.WhereEq{Table: sources, Column: "provider", Value: ProviderYahoo})
+	query.Order(builder.Order{Table: sources, Column: "instrument_id"})
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return nil, fmt.Errorf("build Yahoo mapped instruments query: %w", errBuild)
+	}
+
+	rows, errQuery := r.db.Query(ctx, sql, pgx.NamedArgs(binds))
+	if errQuery != nil {
+		return nil, fmt.Errorf("query Yahoo mapped instruments: %w", errQuery)
+	}
+	defer rows.Close()
+
+	instrumentIDs, errCollect := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if errCollect != nil {
+		return nil, fmt.Errorf("collect Yahoo mapped instruments: %w", errCollect)
+	}
+
+	result := make(map[int64]struct{}, len(instrumentIDs))
+	for _, instrumentID := range instrumentIDs {
+		result[instrumentID] = struct{}{}
+	}
+
+	return result, nil
+}
+
+func (r *Repository) CreateYahooPriceSources(ctx context.Context, items []yahooSourceMapping) (int, error) {
+	if len(items) == 0 {
+		return 0, nil
+	}
+
+	tx, errBegin := r.db.Begin(ctx)
+	if errBegin != nil {
+		return 0, fmt.Errorf("begin Yahoo price source discovery transaction: %w", errBegin)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	table := builder.NewTable("instrument_price_sources")
+	for _, item := range items {
+		query := builder.NewInsert(table)
+		query.Value("instrument_id", item.InstrumentID)
+		query.Value("provider", ProviderYahoo)
+		query.Value("provider_symbol", item.ProviderSymbol)
+		query.Value("enabled", true)
+
+		sql, binds, errBuild := query.Get()
+		if errBuild != nil {
+			return 0, fmt.Errorf("build Yahoo price source insert for instrument %d: %w", item.InstrumentID, errBuild)
+		}
+
+		if _, errExec := tx.Exec(ctx, sql, pgx.NamedArgs(binds)); errExec != nil {
+			return 0, fmt.Errorf("insert Yahoo price source for instrument %d: %w", item.InstrumentID, errExec)
+		}
+	}
+
+	if errCommit := tx.Commit(ctx); errCommit != nil {
+		return 0, fmt.Errorf("commit Yahoo price source discovery transaction: %w", errCommit)
+	}
+
+	return len(items), nil
+}
+
 func (r *Repository) ApplyFundUnitMOEXQuote(
 	ctx context.Context,
+	priceSourceID int64,
 	quote SourceQuote,
 	fetchedAt time.Time,
 ) (bool, bool, appstate.InstrumentPrice, error) {
@@ -170,11 +230,6 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 		return false, false, appstate.InstrumentPrice{}, fmt.Errorf("begin MOEX fund unit quote transaction: %w", errBegin)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-
-	priceSourceID, errSource := ensureFundUnitMOEXSource(ctx, tx)
-	if errSource != nil {
-		return false, false, appstate.InstrumentPrice{}, errSource
-	}
 
 	changed, stale, errApply := applyCurrentPriceQuote(ctx, tx, priceSourceID, quote, fetchedAt)
 	if errApply != nil {
@@ -238,6 +293,7 @@ func (r *Repository) ApplyYahooQuotes(ctx context.Context, items []yahooQuoteToA
 
 func (r *Repository) ApplyFundUnitMOEXDailyPrices(
 	ctx context.Context,
+	priceSourceID int64,
 	items []SourceDailyPrice,
 ) (int, int, *appstate.PriceState, error) {
 	tx, errBegin := r.db.Begin(ctx)
@@ -245,11 +301,6 @@ func (r *Repository) ApplyFundUnitMOEXDailyPrices(
 		return 0, 0, nil, fmt.Errorf("begin MOEX fund unit daily prices transaction: %w", errBegin)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-
-	priceSourceID, errSource := ensureFundUnitMOEXSource(ctx, tx)
-	if errSource != nil {
-		return 0, 0, nil, errSource
-	}
 
 	stored, errStored := loadDailyPrices(ctx, tx, priceSourceID)
 	if errStored != nil {
@@ -322,11 +373,7 @@ func ensureFundUnitMOEXSource(ctx context.Context, tx pgx.Tx) (int64, error) {
 	table := builder.NewTable("instrument_price_sources")
 	query := builder.NewSelect()
 	query.From(table)
-	query.Column(
-		builder.ColumnName{Table: table, Name: "id"},
-		builder.ColumnName{Table: table, Name: "provider_symbol"},
-		builder.ColumnName{Table: table, Name: "enabled"},
-	)
+	query.Column(builder.ColumnName{Table: table, Name: "id"})
 	query.Where(builder.WhereAnd{List: []builder.Where{
 		builder.WhereEq{Table: table, Column: "instrument_id", Value: instrumentID},
 		builder.WhereEq{Table: table, Column: "provider", Value: ProviderMOEX},
@@ -343,27 +390,9 @@ func ensureFundUnitMOEXSource(ctx context.Context, tx pgx.Tx) (int64, error) {
 		return 0, fmt.Errorf("query fund unit MOEX price source: %w", errQuery)
 	}
 
-	stored, errCollect := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[storedPriceSource])
+	storedID, errCollect := pgx.CollectOneRow(rows, pgx.RowTo[int64])
 	if errCollect == nil {
-		if !stored.Enabled {
-			return 0, fmt.Errorf("fund unit MOEX price source is disabled")
-		}
-		if stored.ProviderSymbol != FundUnitISIN {
-			update := builder.NewUpdate(table)
-			update.Set("provider_symbol", FundUnitISIN)
-			update.SetNow("updated_at")
-			update.Where(builder.WhereEq{Table: table, Column: "id", Value: stored.ID})
-
-			sqlUpdate, bindsUpdate, errBuildUpdate := update.Get()
-			if errBuildUpdate != nil {
-				return 0, fmt.Errorf("build normalize fund unit MOEX price source query: %w", errBuildUpdate)
-			}
-			if _, errExecUpdate := tx.Exec(ctx, sqlUpdate, pgx.NamedArgs(bindsUpdate)); errExecUpdate != nil {
-				return 0, fmt.Errorf("normalize fund unit MOEX price source: %w", errExecUpdate)
-			}
-		}
-
-		return stored.ID, nil
+		return storedID, nil
 	}
 	if !errors.Is(errCollect, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("collect fund unit MOEX price source: %w", errCollect)
@@ -398,10 +427,7 @@ func ensureFundUnitInstrument(ctx context.Context, tx pgx.Tx) (int64, error) {
 	table := builder.NewTable("instruments")
 	query := builder.NewSelect()
 	query.From(table)
-	query.Column(
-		builder.ColumnName{Table: table, Name: "id"},
-		builder.ColumnName{Table: table, Name: "asset_type"},
-	)
+	query.Column(builder.ColumnName{Table: table, Name: "id"})
 	query.Where(builder.WhereEq{Table: table, Column: "isin", Value: FundUnitISIN})
 	query.Limit(1)
 
@@ -415,12 +441,9 @@ func ensureFundUnitInstrument(ctx context.Context, tx pgx.Tx) (int64, error) {
 		return 0, fmt.Errorf("query fund unit instrument: %w", errQuery)
 	}
 
-	stored, errCollect := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[storedInstrument])
+	storedID, errCollect := pgx.CollectOneRow(rows, pgx.RowTo[int64])
 	if errCollect == nil {
-		if stored.AssetType != FundUnitAssetType {
-			return 0, fmt.Errorf("fund unit ISIN %s belongs to asset type %s", FundUnitISIN, stored.AssetType)
-		}
-		return stored.ID, nil
+		return storedID, nil
 	}
 	if !errors.Is(errCollect, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("collect fund unit instrument: %w", errCollect)

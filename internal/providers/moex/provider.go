@@ -118,13 +118,13 @@ func NewProvider(baseURL string, client *http.Client) *Provider {
 	}
 }
 
-func (p *Provider) FetchFundUnitQuote(ctx context.Context) (*prices.SourceQuote, error) {
+func (p *Provider) FetchFundUnitQuote(ctx context.Context) (prices.SourceQuote, error) {
 	quote, err := p.fetchQuoteWithBoardRefresh(ctx, fundUnitSecurity)
 	if err != nil {
-		return nil, fmt.Errorf("fetch MOEX fund unit quote: %w", err)
+		return prices.SourceQuote{}, fmt.Errorf("fetch MOEX fund unit quote: %w", err)
 	}
 
-	return &prices.SourceQuote{
+	return prices.SourceQuote{
 		UnitValue: quote.Value,
 		Currency:  quote.Currency,
 		PricedAt:  quote.PricedAt,
@@ -132,31 +132,19 @@ func (p *Provider) FetchFundUnitQuote(ctx context.Context) (*prices.SourceQuote,
 	}, nil
 }
 
-func (p *Provider) FetchRate(ctx context.Context, baseCurrency string, quoteCurrency string) (*fx.SourceRate, error) {
-	base, okBase := normalizeCurrency(baseCurrency)
-	quoteCurrencyNormalized, okQuote := normalizeCurrency(quoteCurrency)
-	if !okBase || !okQuote {
-		return nil, fmt.Errorf("unsupported MOEX FX pair %q/%q", baseCurrency, quoteCurrency)
-	}
-	if base != currency.USD || quoteCurrencyNormalized != currency.RUB {
-		return nil, fmt.Errorf("unsupported MOEX FX pair %s/%s", base, quoteCurrencyNormalized)
-	}
-
+func (p *Provider) FetchUSDRUB(ctx context.Context) (fx.SourceRate, error) {
 	quote, err := p.fetchQuote(ctx, usdRUBSecurity, board{
 		ID:       usdRUBBoardID,
 		Currency: currency.RUB,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fetch MOEX USD/RUB quote: %w", err)
-	}
-	if quote.Currency != quoteCurrencyNormalized {
-		return nil, fmt.Errorf("MOEX USD/RUB quote currency = %s, want %s", quote.Currency, quoteCurrencyNormalized)
+		return fx.SourceRate{}, fmt.Errorf("fetch MOEX USD/RUB quote: %w", err)
 	}
 
-	return &fx.SourceRate{
+	return fx.SourceRate{
 		Provider:      fx.ProviderMOEX,
-		BaseCurrency:  base,
-		QuoteCurrency: quoteCurrencyNormalized,
+		BaseCurrency:  currency.USD,
+		QuoteCurrency: currency.RUB,
 		Rate:          quote.Value,
 		PricedAt:      quote.PricedAt,
 		Source:        quote.Source,
@@ -170,9 +158,9 @@ func (p *Provider) FetchFundUnitDailyPrices(ctx context.Context, from time.Time)
 		return []prices.SourceDailyPrice{}, nil
 	}
 
-	currentBoard, errBoard := p.resolvePrimaryBoard(ctx, fundUnitSecurity, false)
+	currentBoard, errBoard := p.resolveBoard(ctx, fundUnitSecurity, false)
 	if errBoard != nil {
-		return nil, fmt.Errorf("resolve MOEX fund unit primary board for daily prices: %w", errBoard)
+		return nil, fmt.Errorf("resolve MOEX fund unit board for daily prices: %w", errBoard)
 	}
 
 	items := make([]prices.SourceDailyPrice, 0, 512)
@@ -247,6 +235,7 @@ func (p *Provider) FetchFundUnitDailyPrices(ctx context.Context, from time.Time)
 func (p *Provider) previousMoscowDate() time.Time {
 	now := p.now().In(moscowLocation)
 	today := dateonly.UTC(now)
+
 	return today.AddDate(0, 0, -1)
 }
 
@@ -274,9 +263,9 @@ func normalizeDailyPrices(items []prices.SourceDailyPrice) ([]prices.SourceDaily
 }
 
 func (p *Provider) fetchQuoteWithBoardRefresh(ctx context.Context, security marketSecurity) (*marketQuote, error) {
-	currentBoard, errBoard := p.resolvePrimaryBoard(ctx, security, false)
+	currentBoard, errBoard := p.resolveBoard(ctx, security, false)
 	if errBoard != nil {
-		return nil, fmt.Errorf("resolve primary board for %s: %w", security.SecurityID, errBoard)
+		return nil, fmt.Errorf("resolve board for %s: %w", security.SecurityID, errBoard)
 	}
 
 	quote, errQuote := p.fetchQuote(ctx, security, currentBoard)
@@ -284,15 +273,9 @@ func (p *Provider) fetchQuoteWithBoardRefresh(ctx context.Context, security mark
 		return quote, nil
 	}
 
-	refreshedBoard, errRefresh := p.resolvePrimaryBoard(ctx, security, true)
+	refreshedBoard, errRefresh := p.resolveBoard(ctx, security, true)
 	if errRefresh != nil {
-		return nil, fmt.Errorf(
-			"fetch quote for %s on board %s: %v; refresh primary board: %w",
-			security.SecurityID,
-			currentBoard.ID,
-			errQuote,
-			errRefresh,
-		)
+		return nil, fmt.Errorf("fetch quote for %s on board %s: %v; refresh board: %w", security.SecurityID, currentBoard.ID, errQuote, errRefresh)
 	}
 
 	quote, errRetry := p.fetchQuote(ctx, security, refreshedBoard)
@@ -303,7 +286,7 @@ func (p *Provider) fetchQuoteWithBoardRefresh(ctx context.Context, security mark
 	return quote, nil
 }
 
-func (p *Provider) resolvePrimaryBoard(ctx context.Context, security marketSecurity, force bool) (board, error) {
+func (p *Provider) resolveBoard(ctx context.Context, security marketSecurity, force bool) (board, error) {
 	date := p.now().In(moscowLocation).Format(time.DateOnly)
 
 	p.boardMu.Lock()
@@ -314,7 +297,7 @@ func (p *Provider) resolvePrimaryBoard(ctx context.Context, security marketSecur
 	}
 	p.boardMu.Unlock()
 
-	resolved, err := p.fetchPrimaryBoard(ctx, security)
+	resolved, err := p.fetchBoard(ctx, security)
 	if err != nil {
 		return board{}, err
 	}
@@ -326,7 +309,7 @@ func (p *Provider) resolvePrimaryBoard(ctx context.Context, security marketSecur
 	return resolved, nil
 }
 
-func (p *Provider) fetchPrimaryBoard(ctx context.Context, security marketSecurity) (board, error) {
+func (p *Provider) fetchBoard(ctx context.Context, security marketSecurity) (board, error) {
 	requestURL, errURL := url.Parse(p.baseURL + "/iss/securities/" + url.PathEscape(security.SecurityID) + ".json")
 	if errURL != nil {
 		return board{}, fmt.Errorf("build boards URL for %s: %w", security.SecurityID, errURL)
@@ -344,6 +327,9 @@ func (p *Provider) fetchPrimaryBoard(ctx context.Context, security marketSecurit
 	}
 
 	var primary *board
+	var tradedBoard board
+
+	tradedCount := 0
 	for _, data := range payload.Boards.Data {
 		row, ok := rowMap(payload.Boards.Columns, data)
 		if !ok {
@@ -356,9 +342,8 @@ func (p *Provider) fetchPrimaryBoard(ctx context.Context, security marketSecurit
 			continue
 		}
 
-		isPrimary, okPrimary := boolFlag(row["is_primary"])
 		isTraded, okTraded := boolFlag(row["is_traded"])
-		if !okPrimary || !okTraded || !isPrimary || !isTraded {
+		if !okTraded || !isTraded {
 			continue
 		}
 
@@ -370,17 +355,31 @@ func (p *Provider) fetchPrimaryBoard(ctx context.Context, security marketSecurit
 		}
 
 		candidate := board{ID: boardID, Currency: currencyCode}
+		tradedCount++
+		tradedBoard = candidate
+
+		isPrimary, okPrimary := boolFlag(row["is_primary"])
+		if !okPrimary || !isPrimary {
+			continue
+		}
+
 		if primary != nil && *primary != candidate {
 			return board{}, fmt.Errorf("MOEX returned more than one traded primary board for %s", security.SecurityID)
 		}
 		primary = &candidate
 	}
 
-	if primary == nil {
-		return board{}, fmt.Errorf("MOEX returned no traded primary board for %s", security.SecurityID)
+	if primary != nil {
+		return *primary, nil
+	}
+	if tradedCount == 1 {
+		return tradedBoard, nil
+	}
+	if tradedCount > 1 {
+		return board{}, fmt.Errorf("MOEX returned multiple traded boards and no primary board for %s", security.SecurityID)
 	}
 
-	return *primary, nil
+	return board{}, fmt.Errorf("MOEX returned no traded board for %s", security.SecurityID)
 }
 
 func (p *Provider) fetchQuote(ctx context.Context, security marketSecurity, currentBoard board) (*marketQuote, error) {
