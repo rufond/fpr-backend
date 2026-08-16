@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ type Event struct {
 	Scopes           []string               `json:"scopes,omitempty"`
 	InstrumentIDs    []int64                `json:"instrument_ids,omitempty"`
 	InstrumentPrices []InstrumentPriceDelta `json:"instrument_prices,omitempty"`
+	FXRates          []FXRateDelta          `json:"fx_rates,omitempty"`
 }
 
 type client struct {
@@ -120,6 +122,7 @@ func (h *Hub) Publish(update Update) {
 	}
 
 	instrumentPrices := normalizeInstrumentPrices(update.InstrumentPrices)
+	fxRates := normalizeFXRates(update.FXRates)
 	instrumentIDs := make([]int64, 0, len(update.InstrumentIDs)+len(instrumentPrices))
 	instrumentIDs = append(instrumentIDs, update.InstrumentIDs...)
 	for _, price := range instrumentPrices {
@@ -144,6 +147,7 @@ func (h *Hub) Publish(update Update) {
 		Scopes:           scopes,
 		InstrumentIDs:    instrumentIDs,
 		InstrumentPrices: instrumentPrices,
+		FXRates:          fxRates,
 	}
 
 	for subscriber := range h.clients {
@@ -243,6 +247,40 @@ func normalizeInstrumentPrices(prices []InstrumentPriceDelta) []InstrumentPriceD
 
 	slices.SortFunc(result, func(left, right InstrumentPriceDelta) int {
 		return cmp.Compare(left.InstrumentID, right.InstrumentID)
+	})
+
+	return result
+}
+
+func normalizeFXRates(rates []FXRateDelta) []FXRateDelta {
+	type pair struct {
+		base  string
+		quote string
+	}
+
+	byPair := make(map[pair]FXRateDelta, len(rates))
+	for _, rate := range rates {
+		rate.BaseCurrency = strings.ToUpper(strings.TrimSpace(rate.BaseCurrency))
+		rate.QuoteCurrency = strings.ToUpper(strings.TrimSpace(rate.QuoteCurrency))
+		rate.Rate = strings.TrimSpace(rate.Rate)
+		if rate.BaseCurrency == "" || rate.QuoteCurrency == "" || rate.Rate == "" {
+			continue
+		}
+
+		rate.PricedAt = rate.PricedAt.UTC()
+		byPair[pair{base: rate.BaseCurrency, quote: rate.QuoteCurrency}] = rate
+	}
+
+	result := make([]FXRateDelta, 0, len(byPair))
+	for _, rate := range byPair {
+		result = append(result, rate)
+	}
+
+	slices.SortFunc(result, func(left, right FXRateDelta) int {
+		if byBase := cmp.Compare(left.BaseCurrency, right.BaseCurrency); byBase != 0 {
+			return byBase
+		}
+		return cmp.Compare(left.QuoteCurrency, right.QuoteCurrency)
 	})
 
 	return result

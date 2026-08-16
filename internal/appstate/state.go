@@ -10,6 +10,25 @@ import (
 type State struct {
 	Fund   *FundState
 	Prices *PriceState
+	FX     *FXState
+}
+
+type FXState struct {
+	Rates map[FXPair]FXRate
+}
+
+type FXPair struct {
+	BaseCurrency  string
+	QuoteCurrency string
+}
+
+type FXRate struct {
+	BaseCurrency  string
+	QuoteCurrency string
+	Provider      string
+	Rate          string
+	PricedAt      time.Time
+	FetchedAt     time.Time
 }
 
 type PriceState struct {

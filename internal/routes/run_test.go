@@ -8,17 +8,38 @@ import (
 	"testing"
 )
 
-func TestNewHandlerAuthRequired(t *testing.T) {
+func TestNewHandlerAuthRequiredRejectsBeforeHandler(t *testing.T) {
 	t.Parallel()
 
-	handlerCalled := false
+	handler := NewHandler([]Route{
+		{
+			Method:       http.MethodPost,
+			Path:         "/private",
+			AuthRequired: true,
+			Handler: func(Request) (int, error, any) {
+				t.Fatal("protected handler was called without authorization")
+				return 0, nil, nil
+			},
+		},
+	}, nil, func(string) *User { return nil })
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/private", strings.NewReader(`{"broken"`)))
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestNewHandlerAuthRequiredPassesKnownUser(t *testing.T) {
+	t.Parallel()
+
 	handler := NewHandler([]Route{
 		{
 			Method:       http.MethodPost,
 			Path:         "/private",
 			AuthRequired: true,
 			Handler: func(request Request) (int, error, any) {
-				handlerCalled = true
 				if request.User == nil || request.User.Login != "admin" || request.User.Token != "valid-token" {
 					t.Fatalf("request.User = %#v", request.User)
 				}
@@ -32,25 +53,14 @@ func TestNewHandlerAuthRequired(t *testing.T) {
 		return nil
 	})
 
-	unauthorized := httptest.NewRecorder()
-	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/private", strings.NewReader(`{"broken"`)))
-	if unauthorized.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthorized status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
-	}
-	if handlerCalled {
-		t.Fatal("protected handler was called without authorization")
-	}
-
-	authorized := httptest.NewRecorder()
+	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/private", strings.NewReader(`{}`))
 	request.Header.Set("Authorization", "Bearer valid-token")
-	handler.ServeHTTP(authorized, request)
-	if authorized.Code != http.StatusOK {
-		body, _ := io.ReadAll(authorized.Result().Body)
-		t.Fatalf("authorized status = %d, body = %s", authorized.Code, body)
-	}
-	if !handlerCalled {
-		t.Fatal("protected handler was not called with valid authorization")
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		body, _ := io.ReadAll(response.Result().Body)
+		t.Fatalf("status = %d, body = %s", response.Code, body)
 	}
 }
 

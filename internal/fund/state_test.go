@@ -44,6 +44,9 @@ func TestServiceStateBuildsCurrentReadModelFromRAM(t *testing.T) {
 	if result.Market.UnitPrice.InstrumentID != 99 || result.Market.UnitPrice.UnitValue != "3210.5" || result.Market.UnitPrice.Currency != "RUB" {
 		t.Fatalf("market unit price = %#v", result.Market.UnitPrice)
 	}
+	if result.Market.USDRUB == nil || result.Market.USDRUB.Rate != "79.125" {
+		t.Fatalf("USD/RUB = %#v", result.Market.USDRUB)
+	}
 }
 
 func TestServiceHistoryReturnsFullHistory(t *testing.T) {
@@ -206,6 +209,17 @@ func testStateManager(t *testing.T, instrumentID int64) *appstate.Manager {
 					AsOfDate:               time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
 					CalculatedUnitValueUSD: "31.18",
 					NAVUSD:                 "492986650.00",
+				},
+			},
+		},
+		FX: &appstate.FXState{
+			Rates: map[appstate.FXPair]appstate.FXRate{
+				{BaseCurrency: "USD", QuoteCurrency: "RUB"}: {
+					BaseCurrency:  "USD",
+					QuoteCurrency: "RUB",
+					Provider:      "moex",
+					Rate:          "79.125",
+					PricedAt:      time.Date(2026, time.August, 14, 15, 42, 31, 0, time.UTC),
 				},
 			},
 		},

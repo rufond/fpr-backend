@@ -27,13 +27,18 @@ func TestHubPublishNormalizesEvent(t *testing.T) {
 
 	pricedAt := time.Date(2026, time.August, 14, 15, 42, 31, 0, time.FixedZone("test", 2*60*60))
 	hub.Publish(Update{
-		Scopes:        []string{ScopeFundState, ScopeFundHistory, ScopeInstrumentPrices, ScopeFundState, ""},
+		Scopes:        []string{ScopeFundState, ScopeFundHistory, ScopeFXRates, ScopeInstrumentPrices, ScopeFundState, ""},
 		InstrumentIDs: []int64{7, 2, 7, 0, -1},
 		InstrumentPrices: []InstrumentPriceDelta{
 			{InstrumentID: 9, UnitValue: "3200", Currency: "RUB", PricedAt: pricedAt},
 			{InstrumentID: 3, UnitValue: "100", Currency: "USD", PricedAt: pricedAt},
 			{InstrumentID: 9, UnitValue: "3210.5", Currency: "RUB", PricedAt: pricedAt},
 			{InstrumentID: 0, UnitValue: "1", Currency: "RUB", PricedAt: pricedAt},
+		},
+		FXRates: []FXRateDelta{
+			{BaseCurrency: "usd", QuoteCurrency: "rub", Rate: "79", PricedAt: pricedAt},
+			{BaseCurrency: "USD", QuoteCurrency: "RUB", Rate: "79.125", PricedAt: pricedAt},
+			{BaseCurrency: "", QuoteCurrency: "RUB", Rate: "1", PricedAt: pricedAt},
 		},
 	})
 
@@ -47,7 +52,7 @@ func TestHubPublishNormalizesEvent(t *testing.T) {
 		t.Fatalf("revision = %d, want 1", event.Revision)
 	}
 
-	if !slices.Equal(event.Scopes, []string{ScopeFundHistory, ScopeFundState, ScopeInstrumentPrices}) {
+	if !slices.Equal(event.Scopes, []string{ScopeFundHistory, ScopeFundState, ScopeFXRates, ScopeInstrumentPrices}) {
 		t.Fatalf("scopes = %#v", event.Scopes)
 	}
 
@@ -63,6 +68,12 @@ func TestHubPublishNormalizesEvent(t *testing.T) {
 	}
 	if event.InstrumentPrices[0].PricedAt.Location() != time.UTC || event.InstrumentPrices[1].PricedAt.Location() != time.UTC {
 		t.Fatalf("instrument price timestamps are not UTC: %#v", event.InstrumentPrices)
+	}
+	if len(event.FXRates) != 1 || event.FXRates[0].BaseCurrency != "USD" || event.FXRates[0].QuoteCurrency != "RUB" || event.FXRates[0].Rate != "79.125" {
+		t.Fatalf("FX rates = %#v", event.FXRates)
+	}
+	if event.FXRates[0].PricedAt.Location() != time.UTC {
+		t.Fatalf("FX rate timestamp is not UTC: %#v", event.FXRates[0])
 	}
 }
 

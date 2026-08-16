@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rufond/fpr-backend/internal/currency"
+	"github.com/rufond/fpr-backend/internal/fx"
 	"github.com/rufond/fpr-backend/internal/providers"
 )
 
@@ -29,9 +31,9 @@ func TestFetchFundUnitQuoteResolvesPrimaryBoardAndUsesLastPrice(t *testing.T) {
 			}
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = writer.Write([]byte(`{
-				"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[
-					["OLD1",1,0,"SUR"],
-					["NEW1",1,1,"SUR"]
+				"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[
+					["OLD1","stock","shares",1,0,"SUR"],
+					["NEW1","stock","shares",1,1,"SUR"]
 				]}
 			}`))
 		case "/iss/engines/stock/markets/shares/boards/NEW1/securities/RU000A101NK4/securities.json":
@@ -78,7 +80,7 @@ func TestFetchFundUnitQuoteCachesBoardForTradingDay(t *testing.T) {
 		switch request.URL.Path {
 		case "/iss/securities/RU000A101NK4.json":
 			boardRequests.Add(1)
-			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["DYN1",1,1,"RUB"]]}}`))
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["DYN1","stock","shares",1,1,"RUB"]]}}`))
 		case "/iss/engines/stock/markets/shares/boards/DYN1/securities/RU000A101NK4/securities.json":
 			_, _ = writer.Write([]byte(`{
 				"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[3200,"2026-08-15","10:00:00"]]},
@@ -116,7 +118,7 @@ func TestFetchFundUnitQuoteRefreshesBoardAfterQuoteFailure(t *testing.T) {
 			if requestNumber > 1 {
 				boardID = "NEW1"
 			}
-			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["` + boardID + `",1,1,"RUB"]]}}`))
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["` + boardID + `","stock","shares",1,1,"RUB"]]}}`))
 		case "/iss/engines/stock/markets/shares/boards/OLD1/securities/RU000A101NK4/securities.json":
 			writer.WriteHeader(http.StatusNotFound)
 		case "/iss/engines/stock/markets/shares/boards/NEW1/securities/RU000A101NK4/securities.json":
@@ -151,7 +153,7 @@ func TestFetchFundUnitQuoteFallsBackToPreviousPriceAndBoardCurrency(t *testing.T
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/iss/securities/RU000A101NK4.json":
-			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["USD1",1,1,"USD"]]}}`))
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["USD1","stock","shares",1,1,"USD"]]}}`))
 		case "/iss/engines/stock/markets/shares/boards/USD1/securities/RU000A101NK4/securities.json":
 			_, _ = writer.Write([]byte(`{
 				"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[null,"2026-08-15","10:00:00"]]},
@@ -183,7 +185,7 @@ func TestFetchFundUnitQuoteRejectsMissingPrimaryBoard(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["OLD1",1,0,"RUB"]]}}`))
+		_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["OLD1","stock","shares",1,0,"RUB"]]}}`))
 	}))
 	defer server.Close()
 
@@ -218,7 +220,7 @@ func TestFetchFundUnitDailyPricesUsesBoardlessCandlesForCompletedMoscowDays(t *t
 
 		switch request.URL.Path {
 		case "/iss/securities/RU000A101NK4.json":
-			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","is_traded","is_primary","currencyid"],"data":[["CURRENT",1,1,"SUR"]]}}`))
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["CURRENT","stock","shares",1,1,"SUR"]]}}`))
 		case "/iss/engines/stock/markets/shares/securities/RU000A101NK4/candles.json":
 			candleRequests.Add(1)
 			query := request.URL.Query()
@@ -296,5 +298,102 @@ func TestFetchFundUnitDailyPricesDoesNotRequestCurrentMoscowDay(t *testing.T) {
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("requests = %d, want 0", requests.Load())
+	}
+}
+
+func TestFetchRateUSDRUBResolvesCurrencyBoard(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("User-Agent"); got != providers.UserAgent {
+			t.Fatalf("User-Agent = %q, want %q", got, providers.UserAgent)
+		}
+
+		switch request.URL.Path {
+		case "/iss/securities/USD000UTSTOM.json":
+			_, _ = writer.Write([]byte(`{
+				"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[
+					["OTHER","stock","shares",1,1,"RUB"],
+					["CETS","currency","selt",1,1,"SUR"]
+				]}
+			}`))
+		case "/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM/securities.json":
+			_, _ = writer.Write([]byte(`{
+				"marketdata":{"columns":["LAST","TIME","SYSTIME"],"data":[[79.1250,"18:42:31","2026-08-15 18:42:40"]]},
+				"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[78.95,"2026-08-14"]]}
+			}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	rate, err := provider.FetchRate(context.Background(), currency.USD, currency.RUB)
+	if err != nil {
+		t.Fatalf("FetchRate() error = %v", err)
+	}
+
+	if rate.Provider != fx.ProviderMOEX || rate.BaseCurrency != "USD" || rate.QuoteCurrency != "RUB" || rate.Rate != "79.125" || rate.Source != "last" {
+		t.Fatalf("rate = %#v", rate)
+	}
+
+	want := time.Date(2026, time.August, 15, 15, 42, 31, 0, time.UTC)
+	if !rate.PricedAt.Equal(want) {
+		t.Fatalf("PricedAt = %s, want %s", rate.PricedAt, want)
+	}
+}
+
+func TestFetchRateRejectsUnsupportedPair(t *testing.T) {
+	t.Parallel()
+
+	provider := NewProvider("http://127.0.0.1", &http.Client{})
+	if _, err := provider.FetchRate(context.Background(), "EUR", "RUB"); err == nil {
+		t.Fatal("FetchRate() error = nil")
+	}
+}
+
+func TestPrimaryBoardCacheIsSeparatedBySecurity(t *testing.T) {
+	t.Parallel()
+
+	var fundBoards atomic.Int32
+	var fxBoards atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/iss/securities/RU000A101NK4.json":
+			fundBoards.Add(1)
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["TQBR","stock","shares",1,1,"RUB"]]}}`))
+		case "/iss/engines/stock/markets/shares/boards/TQBR/securities/RU000A101NK4/securities.json":
+			_, _ = writer.Write([]byte(`{"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[3200,"2026-08-15","12:00:00"]]},"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[]}}`))
+		case "/iss/securities/USD000UTSTOM.json":
+			fxBoards.Add(1)
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["CETS","currency","selt",1,1,"RUB"]]}}`))
+		case "/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM/securities.json":
+			_, _ = writer.Write([]byte(`{"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[80,"2026-08-15","12:00:00"]]},"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[]}}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	provider.now = func() time.Time { return time.Date(2026, time.August, 15, 10, 0, 0, 0, time.UTC) }
+
+	if _, err := provider.FetchFundUnitQuote(context.Background()); err != nil {
+		t.Fatalf("FetchFundUnitQuote() error = %v", err)
+	}
+	if _, err := provider.FetchRate(context.Background(), "USD", "RUB"); err != nil {
+		t.Fatalf("FetchRate() error = %v", err)
+	}
+	if _, err := provider.FetchFundUnitQuote(context.Background()); err != nil {
+		t.Fatalf("second FetchFundUnitQuote() error = %v", err)
+	}
+	if _, err := provider.FetchRate(context.Background(), "USD", "RUB"); err != nil {
+		t.Fatalf("second FetchRate() error = %v", err)
+	}
+
+	if fundBoards.Load() != 1 || fxBoards.Load() != 1 {
+		t.Fatalf("board requests: fund=%d fx=%d, want 1/1", fundBoards.Load(), fxBoards.Load())
 	}
 }

@@ -14,6 +14,12 @@ type HistoryResult struct {
 
 type StateMarket struct {
 	UnitPrice *StateMarketPrice `json:"unit_price"`
+	USDRUB    *StateFXRate      `json:"usd_rub"`
+}
+
+type StateFXRate struct {
+	Rate     string    `json:"rate"`
+	PricedAt time.Time `json:"priced_at"`
 }
 
 type StateMarketPrice struct {

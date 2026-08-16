@@ -8,6 +8,7 @@ import (
 	"github.com/rufond/fpr-backend/internal/auth"
 	"github.com/rufond/fpr-backend/internal/deps"
 	"github.com/rufond/fpr-backend/internal/fund"
+	"github.com/rufond/fpr-backend/internal/fx"
 	"github.com/rufond/fpr-backend/internal/prices"
 	"github.com/rufond/fpr-backend/internal/realtime"
 	"github.com/rufond/fpr-backend/internal/routes"
@@ -20,6 +21,7 @@ type App struct {
 
 	auth      *auth.Module
 	fund      *fund.Module
+	fx        *fx.Module
 	prices    *prices.Module
 	realtime  *realtime.Hub
 	scheduler *scheduler.Module
@@ -31,6 +33,7 @@ func New(d *deps.Deps) *App {
 	authModule := auth.NewModule(d.Config.Admin.Login, d.Config.Admin.PasswordHash)
 	fundModule := fund.NewModule(d.DB, d.ManagementCompany, stateManager)
 	priceModule := prices.NewModule(d.DB, d.MOEX, stateManager)
+	fxModule := fx.NewModule(d.DB, d.MOEX, stateManager)
 	schedulerModule := scheduler.NewModule(d.DB, realtimeHub)
 
 	schedulerModule.Manager.MustAdd(
@@ -46,6 +49,12 @@ func New(d *deps.Deps) *App {
 		schedulerjobs.MOEXFundUnitSync(priceModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobMOEXUSDRUBSync,
+		"MOEX USD/RUB sync",
+		"* * * * *",
+		schedulerjobs.MOEXUSDRUBSync(fxModule.Service, realtimeHub),
+	)
+	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobMOEXFundUnitHistorySync,
 		"MOEX fund unit history sync",
 		"10 * * * *",
@@ -56,6 +65,7 @@ func New(d *deps.Deps) *App {
 		UserResolver: authModule.Service.ResolveUser,
 		auth:         authModule,
 		fund:         fundModule,
+		fx:           fxModule,
 		prices:       priceModule,
 		realtime:     realtimeHub,
 		scheduler:    schedulerModule,
@@ -67,6 +77,9 @@ func (a *App) Start(ctx context.Context) error {
 		return err
 	}
 	if err := a.prices.Service.Start(ctx); err != nil {
+		return err
+	}
+	if err := a.fx.Service.Start(ctx); err != nil {
 		return err
 	}
 

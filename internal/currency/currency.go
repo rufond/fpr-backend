@@ -1,5 +1,10 @@
 package currency
 
+const (
+	RUB = "RUB"
+	USD = "USD"
+)
+
 func ValidCode(value string) bool {
 	if len(value) != 3 {
 		return false

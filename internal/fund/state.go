@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
+	"github.com/rufond/fpr-backend/internal/currency"
 	"github.com/rufond/fpr-backend/internal/prices"
 )
 
@@ -57,6 +58,15 @@ func buildStateResult(state *appstate.State) *StateResult {
 		Market: StateMarket{
 			UnitPrice: stateFundUnitPrice(state.Prices),
 		},
+	}
+
+	if state.FX != nil {
+		if rate, ok := state.FX.Rates[appstate.FXPair{BaseCurrency: currency.USD, QuoteCurrency: currency.RUB}]; ok {
+			result.Market.USDRUB = &StateFXRate{
+				Rate:     rate.Rate,
+				PricedAt: rate.PricedAt,
+			}
+		}
 	}
 
 	for _, item := range fundState.Snapshot.Assets {
