@@ -32,7 +32,7 @@ func New(d *deps.Deps) *App {
 	stateManager := appstate.NewManager()
 	authModule := auth.NewModule(d.Config.Admin.Login, d.Config.Admin.PasswordHash)
 	fundModule := fund.NewModule(d.DB, d.ManagementCompany, stateManager)
-	priceModule := prices.NewModule(d.DB, d.MOEX, stateManager)
+	priceModule := prices.NewModule(d.DB, d.MOEX, d.Yahoo, stateManager)
 	fxModule := fx.NewModule(d.DB, d.MOEX, stateManager)
 	schedulerModule := scheduler.NewModule(d.DB, realtimeHub)
 
@@ -53,6 +53,12 @@ func New(d *deps.Deps) *App {
 		"MOEX USD/RUB sync",
 		"* * * * *",
 		schedulerjobs.MOEXUSDRUBSync(fxModule.Service, realtimeHub),
+	)
+	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobYahooPricesSync,
+		"Yahoo prices sync",
+		"* * * * *",
+		schedulerjobs.YahooPricesSync(priceModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobMOEXFundUnitHistorySync,

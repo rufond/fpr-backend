@@ -27,6 +27,21 @@ func (s *fakeSource) FetchFundUnitDailyPrices(_ context.Context, from time.Time)
 	return s.daily, s.dailyErr
 }
 
+type fakeYahooSource struct {
+	result  *YahooSourceResult
+	err     error
+	symbols []string
+	onFetch func()
+}
+
+func (s *fakeYahooSource) FetchPrices(_ context.Context, symbols []string) (*YahooSourceResult, error) {
+	s.symbols = append([]string(nil), symbols...)
+	if s.onFetch != nil {
+		s.onFetch()
+	}
+	return s.result, s.err
+}
+
 type fakePriceRepository struct {
 	ensureErr error
 	loadState *appstate.PriceState
@@ -42,6 +57,12 @@ type fakePriceRepository struct {
 	dailyState    *appstate.PriceState
 	dailyErr      error
 	dailyItems    []SourceDailyPrice
+
+	yahooSources   []yahooPriceSource
+	yahooSourceErr error
+	yahooApplied   []yahooQuoteToApply
+	yahooResult    yahooApplyResult
+	yahooApplyErr  error
 }
 
 func (r *fakePriceRepository) EnsureFundUnitMOEXSource(context.Context) error {
@@ -52,12 +73,25 @@ func (r *fakePriceRepository) LoadState(context.Context) (*appstate.PriceState, 
 	return r.loadState, r.loadErr
 }
 
+func (r *fakePriceRepository) YahooPriceSources(context.Context) ([]yahooPriceSource, error) {
+	return r.yahooSources, r.yahooSourceErr
+}
+
 func (r *fakePriceRepository) ApplyFundUnitMOEXQuote(
 	context.Context,
 	SourceQuote,
 	time.Time,
 ) (bool, bool, appstate.InstrumentPrice, error) {
 	return r.applyChanged, r.applyStale, r.applyPrice, r.applyErr
+}
+
+func (r *fakePriceRepository) ApplyYahooQuotes(
+	_ context.Context,
+	items []yahooQuoteToApply,
+	_ time.Time,
+) (yahooApplyResult, error) {
+	r.yahooApplied = append([]yahooQuoteToApply(nil), items...)
+	return r.yahooResult, r.yahooApplyErr
 }
 
 func (r *fakePriceRepository) ApplyFundUnitMOEXDailyPrices(
@@ -103,7 +137,7 @@ func TestServiceStartLoadsPricesIntoExistingApplicationState(t *testing.T) {
 		},
 	}
 	repository := &fakePriceRepository{loadState: priceState}
-	service := NewService(repository, nil, manager)
+	service := NewService(repository, nil, nil, manager)
 	service.now = func() time.Time { return time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC) }
 
 	if err := service.Start(context.Background()); err != nil {
@@ -170,7 +204,7 @@ func TestSyncFundUnitMOEXPublishesRAMOnlyAfterRepositorySuccess(t *testing.T) {
 		PricedAt:  pricedAt,
 		Source:    "last",
 	}}
-	service := NewService(repository, source, manager)
+	service := NewService(repository, source, nil, manager)
 	service.now = func() time.Time { return fetchedAt }
 
 	result, err := service.SyncFundUnitMOEX(context.Background())
@@ -215,7 +249,7 @@ func TestSyncFundUnitMOEXKeepsRAMOnRepositoryError(t *testing.T) {
 		Currency:  "RUB",
 		PricedAt:  time.Now().UTC(),
 		Source:    "last",
-	}}, manager)
+	}}, nil, manager)
 
 	if _, err := service.SyncFundUnitMOEX(context.Background()); err == nil {
 		t.Fatal("SyncFundUnitMOEX() error = nil")
@@ -243,7 +277,7 @@ func TestSyncFundUnitMOEXNoopKeepsCurrentStatePointer(t *testing.T) {
 		Currency:  "RUB",
 		PricedAt:  time.Now().UTC(),
 		Source:    "last",
-	}}, manager)
+	}}, nil, manager)
 
 	result, err := service.SyncFundUnitMOEX(context.Background())
 	if err != nil {
@@ -271,7 +305,7 @@ func TestSyncFundUnitMOEXRejectsInvalidQuoteBeforeRepository(t *testing.T) {
 		Currency:  "RUB",
 		PricedAt:  time.Now().UTC(),
 		Source:    "last",
-	}}, manager)
+	}}, nil, manager)
 
 	if _, err := service.SyncFundUnitMOEX(context.Background()); err == nil {
 		t.Fatal("SyncFundUnitMOEX() error = nil")
@@ -293,7 +327,7 @@ func TestSyncFundUnitMOEXAcceptsProviderCurrency(t *testing.T) {
 		Currency:  "USD",
 		PricedAt:  time.Now().UTC(),
 		Source:    "previous",
-	}}, manager)
+	}}, nil, manager)
 
 	if _, err := service.SyncFundUnitMOEX(context.Background()); err != nil {
 		t.Fatalf("SyncFundUnitMOEX() error = %v", err)
@@ -319,7 +353,7 @@ func TestSyncFundUnitMOEXHistoryBackfillsFromFundRegistrationDate(t *testing.T) 
 	source := &fakeSource{daily: daily}
 	nextPrices := &appstate.PriceState{DailyPrices: map[int64]appstate.InstrumentDailyPriceSeries{7: {PriceSourceID: 7, ISIN: FundUnitISIN, Provider: ProviderMOEX}}}
 	repository := &fakePriceRepository{dailyInserted: 2, dailyState: nextPrices}
-	service := NewService(repository, source, manager)
+	service := NewService(repository, source, nil, manager)
 
 	result, err := service.SyncFundUnitMOEXHistory(context.Background())
 	if err != nil {
@@ -362,7 +396,7 @@ func TestSyncFundUnitMOEXHistoryRefetchesLatestStoredDateInclusively(t *testing.
 	}
 
 	source := &fakeSource{daily: []SourceDailyPrice{}}
-	service := NewService(&fakePriceRepository{}, source, manager)
+	service := NewService(&fakePriceRepository{}, source, nil, manager)
 
 	result, err := service.SyncFundUnitMOEXHistory(context.Background())
 	if err != nil {
@@ -396,7 +430,7 @@ func TestSyncFundUnitMOEXHistoryKeepsRAMOnRepositoryError(t *testing.T) {
 		Currency:  "RUB",
 	}}}
 	repository := &fakePriceRepository{dailyErr: errors.New("write failed")}
-	service := NewService(repository, source, manager)
+	service := NewService(repository, source, nil, manager)
 
 	if _, err := service.SyncFundUnitMOEXHistory(context.Background()); err == nil {
 		t.Fatal("SyncFundUnitMOEXHistory() error = nil")
@@ -420,12 +454,257 @@ func TestSyncFundUnitMOEXHistoryRejectsInvalidDailyPriceBeforeRepository(t *test
 		Currency:  "RUB",
 	}}}
 	repository := &fakePriceRepository{}
-	service := NewService(repository, source, manager)
+	service := NewService(repository, source, nil, manager)
 
 	if _, err := service.SyncFundUnitMOEXHistory(context.Background()); err == nil {
 		t.Fatal("SyncFundUnitMOEXHistory() error = nil")
 	}
 	if repository.dailyItems != nil {
 		t.Fatalf("repository received invalid items: %#v", repository.dailyItems)
+	}
+}
+
+func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
+	t.Parallel()
+
+	instrumentID := int64(42)
+	manager := appstate.NewManager()
+	initialPrices := &appstate.PriceState{
+		Sources: map[int64]appstate.InstrumentPrice{
+			7: {
+				PriceSourceID: 7,
+				InstrumentID:  7,
+				ISIN:          FundUnitISIN,
+				Provider:      ProviderMOEX,
+				UnitValue:     "729.5",
+				Currency:      "RUB",
+			},
+		},
+		DailyPrices: map[int64]appstate.InstrumentDailyPriceSeries{
+			7: {PriceSourceID: 7, ISIN: FundUnitISIN, Provider: ProviderMOEX},
+		},
+		Points: map[int64]appstate.InstrumentPricePointSeries{},
+	}
+	if err := manager.Initialize(&appstate.State{
+		Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{
+			{InstrumentID: &instrumentID},
+		}}},
+		Prices: initialPrices,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	pricedAt := time.Date(2026, time.August, 16, 15, 10, 0, 0, time.UTC)
+	fetchedAt := time.Date(2026, time.August, 16, 15, 10, 5, 0, time.UTC)
+	repository := &fakePriceRepository{
+		yahooSources: []yahooPriceSource{
+			{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: " dre2.f "},
+			{PriceSourceID: 11, InstrumentID: 99, ProviderSymbol: "OLD"},
+		},
+		yahooResult: yahooApplyResult{ChangedPrices: []appstate.InstrumentPrice{
+			{
+				PriceSourceID:  10,
+				InstrumentID:   42,
+				AssetType:      "equity",
+				ISIN:           "DE000A3H2333",
+				Name:           "D2C",
+				Provider:       ProviderYahoo,
+				ProviderSymbol: "DRE2.F",
+				UnitValue:      "126.32",
+				Currency:       "GBP",
+				PricedAt:       pricedAt,
+				FetchedAt:      fetchedAt,
+			},
+		}},
+	}
+	source := &fakeYahooSource{result: &YahooSourceResult{
+		RequestedSymbols: 1,
+		ReturnedSymbols:  1,
+		Batches:          1,
+		QuotesByRequest: map[string]YahooSourceQuote{
+			" dre2.f ": {
+				Currency:  "GBP",
+				UnitValue: "126.32",
+				PricedAt:  pricedAt,
+			},
+		},
+	}}
+	service := NewService(repository, nil, source, manager)
+	service.now = func() time.Time { return fetchedAt }
+
+	result, err := service.SyncYahooPrices(context.Background())
+	if err != nil {
+		t.Fatalf("SyncYahooPrices() error = %v", err)
+	}
+	if len(source.symbols) != 1 || source.symbols[0] != " dre2.f " {
+		t.Fatalf("fetched symbols = %#v, want configured Yahoo symbol", source.symbols)
+	}
+	if result.ExpectedSources != 1 || !result.Changed() || len(result.ChangedPrices) != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(repository.yahooApplied) != 1 {
+		t.Fatalf("applied Yahoo quotes = %#v", repository.yahooApplied)
+	}
+	applied := repository.yahooApplied[0]
+	if applied.PriceSourceID != 10 || applied.InstrumentID != 42 || applied.Quote.UnitValue != "126.32" || applied.Quote.Currency != "GBP" || !applied.Quote.PricedAt.Equal(pricedAt) {
+		t.Fatalf("applied Yahoo quote = %#v", applied)
+	}
+
+	current := manager.Load()
+	if current.Prices == initialPrices {
+		t.Fatal("changed Yahoo prices kept old price-state pointer")
+	}
+	if current.Prices.Sources[7].UnitValue != "729.5" {
+		t.Fatalf("existing MOEX price was lost: %#v", current.Prices.Sources)
+	}
+	if current.Prices.Sources[10].UnitValue != "126.32" {
+		t.Fatalf("Yahoo price = %#v", current.Prices.Sources[10])
+	}
+	if current.Prices.DailyPrices[7].PriceSourceID != 7 {
+		t.Fatalf("daily prices were not preserved: %#v", current.Prices.DailyPrices)
+	}
+	points := current.Prices.Points[10].Items
+	if len(points) != 1 || points[0].UnitValue != "126.32" || !points[0].ObservedAt.Equal(fetchedAt) {
+		t.Fatalf("Yahoo price points = %#v", points)
+	}
+}
+
+func TestSyncYahooPricesSkipsMissingAndInvalidQuotes(t *testing.T) {
+	t.Parallel()
+
+	firstID := int64(42)
+	secondID := int64(43)
+	manager := appstate.NewManager()
+	initial := &appstate.State{
+		Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{
+			{InstrumentID: &firstID},
+			{InstrumentID: &secondID},
+		}}},
+		Prices: &appstate.PriceState{Sources: map[int64]appstate.InstrumentPrice{}},
+	}
+	if err := manager.Initialize(initial); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	repository := &fakePriceRepository{yahooSources: []yahooPriceSource{
+		{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"},
+		{PriceSourceID: 11, InstrumentID: 43, ProviderSymbol: "BBB"},
+	}}
+	source := &fakeYahooSource{result: &YahooSourceResult{
+		RequestedSymbols: 2,
+		ReturnedSymbols:  1,
+		Batches:          1,
+		QuotesByRequest:  map[string]YahooSourceQuote{},
+		MissingRequests:  1,
+		InvalidRequests:  1,
+		Missing:          []string{"BBB"},
+		Invalid:          []YahooQuoteIssue{{Symbol: "AAA", Error: "Yahoo price: value must be positive"}},
+	}}
+	service := NewService(repository, nil, source, manager)
+
+	result, err := service.SyncYahooPrices(context.Background())
+	if err != nil {
+		t.Fatalf("SyncYahooPrices() error = %v", err)
+	}
+	if result.InvalidSources != 1 || result.MissingSources != 1 || len(result.InvalidQuotes) != 1 || len(result.MissingSymbols) != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if repository.yahooApplied != nil {
+		t.Fatalf("repository received skipped quotes: %#v", repository.yahooApplied)
+	}
+	if manager.Load() != initial {
+		t.Fatal("skipped Yahoo quotes replaced application state")
+	}
+}
+
+func TestSyncYahooPricesRechecksCompositionAfterFetch(t *testing.T) {
+	t.Parallel()
+
+	instrumentID := int64(42)
+	manager := appstate.NewManager()
+	initial := &appstate.State{
+		Fund:   &appstate.FundState{Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{{InstrumentID: &instrumentID}}}},
+		Prices: &appstate.PriceState{Sources: map[int64]appstate.InstrumentPrice{}},
+	}
+	if err := manager.Initialize(initial); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	repository := &fakePriceRepository{yahooSources: []yahooPriceSource{
+		{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"},
+	}}
+	pricedAt := time.Date(2026, time.August, 16, 15, 20, 0, 0, time.UTC)
+	source := &fakeYahooSource{result: &YahooSourceResult{
+		RequestedSymbols: 1,
+		ReturnedSymbols:  1,
+		Batches:          1,
+		QuotesByRequest: map[string]YahooSourceQuote{
+			"AAA": {Currency: "USD", UnitValue: "10", PricedAt: pricedAt},
+		},
+	}}
+	source.onFetch = func() {
+		if err := manager.Update(func(current *appstate.State) (*appstate.State, error) {
+			next := new(*current)
+			next.Fund = &appstate.FundState{Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{}}}
+			return next, nil
+		}); err != nil {
+			t.Fatalf("Update() error = %v", err)
+		}
+	}
+
+	service := NewService(repository, nil, source, manager)
+	result, err := service.SyncYahooPrices(context.Background())
+	if err != nil {
+		t.Fatalf("SyncYahooPrices() error = %v", err)
+	}
+	if result.CompositionSkippedSources != 1 || result.Changed() {
+		t.Fatalf("result = %#v", result)
+	}
+	if repository.yahooApplied != nil {
+		t.Fatalf("repository received stale composition quote: %#v", repository.yahooApplied)
+	}
+	if len(manager.Load().Fund.Snapshot.Assets) != 0 {
+		t.Fatalf("current fund state was reverted: %#v", manager.Load().Fund.Snapshot.Assets)
+	}
+}
+
+func TestSyncYahooPricesKeepsRAMOnRepositoryError(t *testing.T) {
+	t.Parallel()
+
+	instrumentID := int64(42)
+	manager := appstate.NewManager()
+	initial := &appstate.State{
+		Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{
+			{InstrumentID: &instrumentID},
+		}}},
+		Prices: &appstate.PriceState{Sources: map[int64]appstate.InstrumentPrice{}},
+	}
+	if err := manager.Initialize(initial); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	repository := &fakePriceRepository{
+		yahooSources:  []yahooPriceSource{{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"}},
+		yahooApplyErr: errors.New("write failed"),
+	}
+	source := &fakeYahooSource{result: &YahooSourceResult{
+		RequestedSymbols: 1,
+		ReturnedSymbols:  1,
+		Batches:          1,
+		QuotesByRequest: map[string]YahooSourceQuote{
+			"AAA": {
+				Currency:  "USD",
+				UnitValue: "10",
+				PricedAt:  time.Date(2026, time.August, 16, 15, 25, 0, 0, time.UTC),
+			},
+		},
+	}}
+
+	service := NewService(repository, nil, source, manager)
+	if _, err := service.SyncYahooPrices(context.Background()); err == nil {
+		t.Fatal("SyncYahooPrices() error = nil")
+	}
+	if manager.Load() != initial {
+		t.Fatal("RAM state changed after Yahoo repository error")
 	}
 }

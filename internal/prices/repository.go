@@ -125,6 +125,41 @@ func (r *Repository) LoadState(ctx context.Context) (*appstate.PriceState, error
 	return loadPriceState(ctx, r.db)
 }
 
+func (r *Repository) YahooPriceSources(ctx context.Context) ([]yahooPriceSource, error) {
+	sources := builder.NewTable("instrument_price_sources")
+
+	query := builder.NewSelect()
+	query.From(sources)
+	query.Column(
+		builder.ColumnName{Table: sources, Name: "id", Alias: "price_source_id"},
+		builder.ColumnName{Table: sources, Name: "instrument_id"},
+		builder.ColumnName{Table: sources, Name: "provider_symbol"},
+	)
+	query.Where(builder.WhereAnd{List: []builder.Where{
+		builder.WhereEq{Table: sources, Column: "provider", Value: ProviderYahoo},
+		builder.WhereEq{Table: sources, Column: "enabled", Value: true},
+	}})
+	query.Order(builder.Order{Table: sources, Column: "instrument_id"})
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return nil, fmt.Errorf("build Yahoo price sources query: %w", errBuild)
+	}
+
+	rows, errQuery := r.db.Query(ctx, sql, pgx.NamedArgs(binds))
+	if errQuery != nil {
+		return nil, fmt.Errorf("query Yahoo price sources: %w", errQuery)
+	}
+	defer rows.Close()
+
+	stored, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[yahooPriceSource])
+	if errCollect != nil {
+		return nil, fmt.Errorf("collect Yahoo price sources: %w", errCollect)
+	}
+
+	return stored, nil
+}
+
 func (r *Repository) ApplyFundUnitMOEXQuote(
 	ctx context.Context,
 	quote SourceQuote,
@@ -141,44 +176,9 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 		return false, false, appstate.InstrumentPrice{}, errSource
 	}
 
-	stored, errStored := loadCurrentPrice(ctx, tx, priceSourceID)
-	if errStored != nil && !errors.Is(errStored, pgx.ErrNoRows) {
-		return false, false, appstate.InstrumentPrice{}, errStored
-	}
-
-	if stored != nil && quote.PricedAt.Before(stored.PricedAt) {
-		price, errPrice := loadInstrumentPrice(ctx, tx, priceSourceID)
-		if errPrice != nil {
-			return false, false, appstate.InstrumentPrice{}, errPrice
-		}
-		if errCommit := tx.Commit(ctx); errCommit != nil {
-			return false, false, appstate.InstrumentPrice{}, fmt.Errorf("commit stale MOEX fund unit quote transaction: %w", errCommit)
-		}
-		return false, true, price, nil
-	}
-
-	if stored != nil &&
-		decimal.Equal(stored.UnitValue, quote.UnitValue) &&
-		stored.Currency == quote.Currency &&
-		stored.PricedAt.Equal(quote.PricedAt) {
-		price, errPrice := loadInstrumentPrice(ctx, tx, priceSourceID)
-		if errPrice != nil {
-			return false, false, appstate.InstrumentPrice{}, errPrice
-		}
-		if errCommit := tx.Commit(ctx); errCommit != nil {
-			return false, false, appstate.InstrumentPrice{}, fmt.Errorf("commit unchanged MOEX fund unit quote transaction: %w", errCommit)
-		}
-		return false, false, price, nil
-	}
-
-	if errPersist := persistCurrentPrice(ctx, tx, priceSourceID, quote, fetchedAt, stored != nil); errPersist != nil {
-		return false, false, appstate.InstrumentPrice{}, errPersist
-	}
-	if errPoint := insertPricePoint(ctx, tx, priceSourceID, quote, fetchedAt); errPoint != nil {
-		return false, false, appstate.InstrumentPrice{}, errPoint
-	}
-	if errCleanup := deleteOldPricePoints(ctx, tx, priceSourceID, fetchedAt.Add(-pricePointRetention)); errCleanup != nil {
-		return false, false, appstate.InstrumentPrice{}, errCleanup
+	changed, stale, errApply := applyCurrentPriceQuote(ctx, tx, priceSourceID, quote, fetchedAt)
+	if errApply != nil {
+		return false, false, appstate.InstrumentPrice{}, errApply
 	}
 
 	price, errPrice := loadInstrumentPrice(ctx, tx, priceSourceID)
@@ -190,7 +190,50 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 		return false, false, appstate.InstrumentPrice{}, fmt.Errorf("commit MOEX fund unit quote transaction: %w", errCommit)
 	}
 
-	return true, false, price, nil
+	return changed, stale, price, nil
+}
+
+func (r *Repository) ApplyYahooQuotes(ctx context.Context, items []yahooQuoteToApply, fetchedAt time.Time) (yahooApplyResult, error) {
+	result := yahooApplyResult{ChangedPrices: make([]appstate.InstrumentPrice, 0, len(items))}
+	if len(items) == 0 {
+		return result, nil
+	}
+
+	tx, errBegin := r.db.Begin(ctx)
+	if errBegin != nil {
+		return yahooApplyResult{}, fmt.Errorf("begin Yahoo prices transaction: %w", errBegin)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, item := range items {
+		changed, stale, errApply := applyCurrentPriceQuote(ctx, tx, item.PriceSourceID, item.Quote, fetchedAt)
+		if errApply != nil {
+			return yahooApplyResult{}, fmt.Errorf("apply Yahoo price source %d: %w", item.PriceSourceID, errApply)
+		}
+
+		if stale {
+			result.Stale++
+			continue
+		}
+
+		if !changed {
+			result.Unchanged++
+			continue
+		}
+
+		price, errPrice := loadInstrumentPrice(ctx, tx, item.PriceSourceID)
+		if errPrice != nil {
+			return yahooApplyResult{}, fmt.Errorf("load Yahoo price source %d after update: %w", item.PriceSourceID, errPrice)
+		}
+
+		result.ChangedPrices = append(result.ChangedPrices, price)
+	}
+
+	if errCommit := tx.Commit(ctx); errCommit != nil {
+		return yahooApplyResult{}, fmt.Errorf("commit Yahoo prices transaction: %w", errCommit)
+	}
+
+	return result, nil
 }
 
 func (r *Repository) ApplyFundUnitMOEXDailyPrices(
@@ -405,6 +448,35 @@ func ensureFundUnitInstrument(ctx context.Context, tx pgx.Tx) (int64, error) {
 	}
 
 	return created, nil
+}
+
+func applyCurrentPriceQuote(ctx context.Context, tx pgx.Tx, priceSourceID int64, quote SourceQuote, fetchedAt time.Time) (bool, bool, error) {
+	stored, errStored := loadCurrentPrice(ctx, tx, priceSourceID)
+	if errStored != nil && !errors.Is(errStored, pgx.ErrNoRows) {
+		return false, false, errStored
+	}
+
+	if stored != nil && quote.PricedAt.Before(stored.PricedAt) {
+		return false, true, nil
+	}
+
+	if stored != nil && decimal.Equal(stored.UnitValue, quote.UnitValue) && stored.Currency == quote.Currency && stored.PricedAt.Equal(quote.PricedAt) {
+		return false, false, nil
+	}
+
+	if errPersist := persistCurrentPrice(ctx, tx, priceSourceID, quote, fetchedAt, stored != nil); errPersist != nil {
+		return false, false, errPersist
+	}
+
+	if errPoint := insertPricePoint(ctx, tx, priceSourceID, quote, fetchedAt); errPoint != nil {
+		return false, false, errPoint
+	}
+
+	if errCleanup := deleteOldPricePoints(ctx, tx, priceSourceID, fetchedAt.Add(-pricePointRetention)); errCleanup != nil {
+		return false, false, errCleanup
+	}
+
+	return true, false, nil
 }
 
 func loadCurrentPrice(ctx context.Context, db priceQueryer, priceSourceID int64) (*storedCurrentPrice, error) {

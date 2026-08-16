@@ -13,6 +13,7 @@ import (
 	"github.com/rufond/fpr-backend/internal/config"
 	"github.com/rufond/fpr-backend/internal/providers/managementcompany"
 	"github.com/rufond/fpr-backend/internal/providers/moex"
+	"github.com/rufond/fpr-backend/internal/providers/yahoo"
 )
 
 type Deps struct {
@@ -22,6 +23,7 @@ type Deps struct {
 
 	ManagementCompany *managementcompany.Provider
 	MOEX              *moex.Provider
+	Yahoo             *yahoo.Provider
 }
 
 func New(ctx context.Context, cfg *config.Config) (*Deps, error) {
@@ -32,18 +34,28 @@ func New(ctx context.Context, cfg *config.Config) (*Deps, error) {
 		return nil, err
 	}
 
+	yahooProvider, errYahoo := yahoo.NewProvider()
+	if errYahoo != nil {
+		db.Close()
+		return nil, errYahoo
+	}
+
 	return &Deps{
 		Config:            cfg,
 		DB:                db,
 		Logger:            logger,
 		ManagementCompany: managementcompany.NewProvider(cfg.ManagementCompany.FundURL, nil),
 		MOEX:              moex.NewProvider("", nil),
+		Yahoo:             yahooProvider,
 	}, nil
 }
 
 func (d *Deps) Close() {
 	if d == nil {
 		return
+	}
+	if d.Yahoo != nil {
+		d.Yahoo.Close()
 	}
 	if d.DB != nil {
 		d.DB.Close()

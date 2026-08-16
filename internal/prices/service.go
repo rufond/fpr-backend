@@ -19,11 +19,13 @@ var fundUnitHistoryStartDate = time.Date(2020, time.February, 5, 0, 0, 0, 0, tim
 type serviceRepository interface {
 	EnsureFundUnitMOEXSource(ctx context.Context) error
 	LoadState(ctx context.Context) (*appstate.PriceState, error)
+	YahooPriceSources(ctx context.Context) ([]yahooPriceSource, error)
 	ApplyFundUnitMOEXQuote(
 		ctx context.Context,
 		quote SourceQuote,
 		fetchedAt time.Time,
 	) (changed bool, stale bool, price appstate.InstrumentPrice, err error)
+	ApplyYahooQuotes(ctx context.Context, items []yahooQuoteToApply, fetchedAt time.Time) (yahooApplyResult, error)
 	ApplyFundUnitMOEXDailyPrices(
 		ctx context.Context,
 		items []SourceDailyPrice,
@@ -33,14 +35,16 @@ type serviceRepository interface {
 type Service struct {
 	repository serviceRepository
 	source     Source
+	yahoo      YahooSource
 	state      *appstate.Manager
 	now        func() time.Time
 }
 
-func NewService(repository serviceRepository, source Source, state *appstate.Manager) *Service {
+func NewService(repository serviceRepository, source Source, yahooSource YahooSource, state *appstate.Manager) *Service {
 	return &Service{
 		repository: repository,
 		source:     source,
+		yahoo:      yahooSource,
 		state:      state,
 		now:        time.Now,
 	}
@@ -102,8 +106,9 @@ func (s *Service) SyncFundUnitMOEX(ctx context.Context) (*SyncResult, error) {
 	if quote == nil {
 		return nil, fmt.Errorf("MOEX fund unit quote is nil")
 	}
-	if errValidate := validateFundUnitMOEXQuote(*quote); errValidate != nil {
-		return nil, errValidate
+
+	if errValidate := validateSourceQuote(*quote); errValidate != nil {
+		return nil, fmt.Errorf("invalid MOEX fund unit quote: %w", errValidate)
 	}
 
 	result := &SyncResult{Source: quote.Source}
@@ -127,49 +132,143 @@ func (s *Service) SyncFundUnitMOEX(ctx context.Context) (*SyncResult, error) {
 			return current, nil
 		}
 
-		priceState := &appstate.PriceState{
-			Sources: map[int64]appstate.InstrumentPrice{},
-			Points:  map[int64]appstate.InstrumentPricePointSeries{},
-		}
-		if current.Prices != nil {
-			priceState.Sources = maps.Clone(current.Prices.Sources)
-			priceState.DailyPrices = current.Prices.DailyPrices
-			priceState.Points = maps.Clone(current.Prices.Points)
-		}
-		if priceState.Sources == nil {
-			priceState.Sources = map[int64]appstate.InstrumentPrice{}
-		}
-		if priceState.Points == nil {
-			priceState.Points = map[int64]appstate.InstrumentPricePointSeries{}
-		}
-
-		priceState.Sources[price.PriceSourceID] = price
-
-		series, exists := priceState.Points[price.PriceSourceID]
-		if !exists {
-			series = appstate.InstrumentPricePointSeries{
-				PriceSourceID:  price.PriceSourceID,
-				InstrumentID:   price.InstrumentID,
-				AssetType:      price.AssetType,
-				ISIN:           price.ISIN,
-				Name:           price.Name,
-				Provider:       price.Provider,
-				ProviderSymbol: price.ProviderSymbol,
-			}
-		} else {
-			series.Items = slices.Clone(series.Items)
-		}
-		series.Items = append(series.Items, appstate.InstrumentPricePoint{
-			UnitValue:  price.UnitValue,
-			Currency:   price.Currency,
-			PricedAt:   price.PricedAt,
-			ObservedAt: fetchedAt,
-		})
-		series.Items = retainedPricePoints(series.Items, fetchedAt.Add(-pricePointRetention))
-		priceState.Points[price.PriceSourceID] = series
-
 		next := new(*current)
-		next.Prices = priceState
+		next.Prices = priceStateWithCurrentUpdates(current.Prices, []appstate.InstrumentPrice{price}, fetchedAt)
+		return next, nil
+	})
+	if errUpdate != nil {
+		return nil, errUpdate
+	}
+
+	return result, nil
+}
+
+func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error) {
+	if s.repository == nil {
+		return nil, fmt.Errorf("price repository is not configured")
+	}
+
+	if s.yahoo == nil {
+		return nil, fmt.Errorf("Yahoo source is not configured")
+	}
+
+	if s.state == nil {
+		return nil, fmt.Errorf("application state manager is not configured")
+	}
+
+	current := s.state.Load()
+	if current == nil || current.Fund == nil {
+		return nil, fmt.Errorf("fund state is not initialized")
+	}
+
+	priceSources, errSources := s.repository.YahooPriceSources(ctx)
+	if errSources != nil {
+		return nil, errSources
+	}
+
+	currentInstrumentIDs := currentFundInstrumentIDs(current)
+	activeSources := make([]yahooPriceSource, 0, len(priceSources))
+	symbols := make([]string, 0, len(priceSources))
+
+	for _, source := range priceSources {
+		if _, currentInstrument := currentInstrumentIDs[source.InstrumentID]; !currentInstrument {
+			continue
+		}
+		if strings.TrimSpace(source.ProviderSymbol) == "" {
+			return nil, fmt.Errorf("Yahoo price source %d has empty provider symbol", source.PriceSourceID)
+		}
+
+		activeSources = append(activeSources, source)
+		symbols = append(symbols, source.ProviderSymbol)
+	}
+
+	result := &YahooSyncResult{ExpectedSources: len(activeSources)}
+	if len(activeSources) == 0 {
+		return result, nil
+	}
+
+	fetchResult, errFetch := s.yahoo.FetchPrices(ctx, symbols)
+	if errFetch != nil {
+		return nil, fmt.Errorf("fetch Yahoo prices: %w", errFetch)
+	}
+
+	if fetchResult == nil {
+		return nil, fmt.Errorf("Yahoo fetch result is nil")
+	}
+
+	result.RequestedSymbols = fetchResult.RequestedSymbols
+	result.ReturnedSymbols = fetchResult.ReturnedSymbols
+	result.Batches = fetchResult.Batches
+	result.MissingSources = fetchResult.MissingRequests
+	result.InvalidSources = fetchResult.InvalidRequests
+	result.MissingSymbols = slices.Clone(fetchResult.Missing)
+	result.UnexpectedSymbols = slices.Clone(fetchResult.Unexpected)
+	result.DuplicateSymbols = slices.Clone(fetchResult.Duplicates)
+	result.InvalidQuotes = slices.Clone(fetchResult.Invalid)
+
+	items := make([]yahooQuoteToApply, 0, len(activeSources))
+	for _, source := range activeSources {
+		quote, exists := fetchResult.QuotesByRequest[source.ProviderSymbol]
+		if !exists {
+			continue
+		}
+
+		sourceQuote := SourceQuote{
+			UnitValue: quote.UnitValue,
+			Currency:  quote.Currency,
+			PricedAt:  quote.PricedAt,
+			Source:    ProviderYahoo,
+		}
+		if errValidate := validateSourceQuote(sourceQuote); errValidate != nil {
+			return nil, fmt.Errorf("invalid normalized Yahoo quote for price source %d: %w", source.PriceSourceID, errValidate)
+		}
+
+		items = append(items, yahooQuoteToApply{
+			PriceSourceID: source.PriceSourceID,
+			InstrumentID:  source.InstrumentID,
+			Quote:         sourceQuote,
+		})
+	}
+
+	if len(items) == 0 {
+		return result, nil
+	}
+
+	fetchedAt := s.now().UTC()
+	errUpdate := s.state.Update(func(currentState *appstate.State) (*appstate.State, error) {
+		if currentState == nil || currentState.Fund == nil {
+			return nil, fmt.Errorf("fund state is not initialized")
+		}
+
+		activeInstrumentIDs := currentFundInstrumentIDs(currentState)
+		activeItems := make([]yahooQuoteToApply, 0, len(items))
+		for _, item := range items {
+			if _, active := activeInstrumentIDs[item.InstrumentID]; active {
+				activeItems = append(activeItems, item)
+			} else {
+				result.CompositionSkippedSources++
+			}
+		}
+		if len(activeItems) == 0 {
+			return currentState, nil
+		}
+
+		applied, errApply := s.repository.ApplyYahooQuotes(ctx, activeItems, fetchedAt)
+		if errApply != nil {
+			return nil, errApply
+		}
+
+		result.ChangedPrices = applied.ChangedPrices
+		result.UnchangedSources = applied.Unchanged
+		result.StaleSources = applied.Stale
+
+		if len(applied.ChangedPrices) == 0 {
+			return currentState, nil
+		}
+
+		next := new(*currentState)
+		next.Prices = priceStateWithCurrentUpdates(currentState.Prices, applied.ChangedPrices, fetchedAt)
+
 		return next, nil
 	})
 	if errUpdate != nil {
@@ -246,6 +345,70 @@ func (s *Service) SyncFundUnitMOEXHistory(ctx context.Context) (*DailySyncResult
 	return result, nil
 }
 
+func currentFundInstrumentIDs(state *appstate.State) map[int64]struct{} {
+	if state == nil || state.Fund == nil {
+		return nil
+	}
+
+	result := make(map[int64]struct{}, len(state.Fund.Snapshot.Assets))
+	for _, asset := range state.Fund.Snapshot.Assets {
+		if asset.InstrumentID != nil {
+			result[*asset.InstrumentID] = struct{}{}
+		}
+	}
+
+	return result
+}
+
+func priceStateWithCurrentUpdates(current *appstate.PriceState, prices []appstate.InstrumentPrice, observedAt time.Time) *appstate.PriceState {
+	next := &appstate.PriceState{
+		Sources: map[int64]appstate.InstrumentPrice{},
+		Points:  map[int64]appstate.InstrumentPricePointSeries{},
+	}
+	if current != nil {
+		next.Sources = maps.Clone(current.Sources)
+		next.DailyPrices = current.DailyPrices
+		next.Points = maps.Clone(current.Points)
+	}
+	if next.Sources == nil {
+		next.Sources = map[int64]appstate.InstrumentPrice{}
+	}
+	if next.Points == nil {
+		next.Points = map[int64]appstate.InstrumentPricePointSeries{}
+	}
+
+	for _, price := range prices {
+		next.Sources[price.PriceSourceID] = price
+
+		series, exists := next.Points[price.PriceSourceID]
+		if !exists {
+			series = appstate.InstrumentPricePointSeries{
+				PriceSourceID:  price.PriceSourceID,
+				InstrumentID:   price.InstrumentID,
+				AssetType:      price.AssetType,
+				ISIN:           price.ISIN,
+				Name:           price.Name,
+				Provider:       price.Provider,
+				ProviderSymbol: price.ProviderSymbol,
+			}
+		} else {
+			series.Items = slices.Clone(series.Items)
+		}
+
+		series.Items = append(series.Items, appstate.InstrumentPricePoint{
+			UnitValue:  price.UnitValue,
+			Currency:   price.Currency,
+			PricedAt:   price.PricedAt,
+			ObservedAt: observedAt,
+		})
+		series.Items = retainedPricePoints(series.Items, observedAt.Add(-pricePointRetention))
+
+		next.Points[price.PriceSourceID] = series
+	}
+
+	return next
+}
+
 func retainedPricePoints(items []appstate.InstrumentPricePoint, cutoff time.Time) []appstate.InstrumentPricePoint {
 	return slices.DeleteFunc(items, func(item appstate.InstrumentPricePoint) bool {
 		return item.ObservedAt.Before(cutoff)
@@ -319,19 +482,22 @@ func normalizeFundUnitMOEXDailyPrices(items []SourceDailyPrice) ([]SourceDailyPr
 	return result, nil
 }
 
-func validateFundUnitMOEXQuote(quote SourceQuote) error {
+func validateSourceQuote(quote SourceQuote) error {
 	value, ok := decimal.Parse(quote.UnitValue)
 	if !ok || value.Sign() <= 0 {
-		return fmt.Errorf("MOEX fund unit quote has invalid unit value %q", quote.UnitValue)
+		return fmt.Errorf("invalid unit value %q", quote.UnitValue)
 	}
+
 	if !currency.ValidCode(strings.TrimSpace(quote.Currency)) {
-		return fmt.Errorf("MOEX fund unit quote has invalid currency %q", quote.Currency)
+		return fmt.Errorf("invalid currency %q", quote.Currency)
 	}
+
 	if quote.PricedAt.IsZero() {
-		return fmt.Errorf("MOEX fund unit quote has zero priced_at")
+		return fmt.Errorf("zero priced_at")
 	}
+
 	if strings.TrimSpace(quote.Source) == "" {
-		return fmt.Errorf("MOEX fund unit quote has empty source")
+		return fmt.Errorf("empty source")
 	}
 
 	return nil

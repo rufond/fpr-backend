@@ -11,9 +11,9 @@ type Module struct {
 	Service    *Service
 }
 
-func NewModule(db *pgxpool.Pool, source Source, state *appstate.Manager) *Module {
+func NewModule(db *pgxpool.Pool, source Source, yahoo YahooSource, state *appstate.Manager) *Module {
 	repository := NewRepository(db)
-	service := NewService(repository, source, state)
+	service := NewService(repository, source, yahoo, state)
 
 	return &Module{
 		Repository: repository,
