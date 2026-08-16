@@ -19,6 +19,7 @@ type RunWriter struct {
 
 func NewRunWriter(flushEvery time.Duration, flush func(messages []map[string]any) error) *RunWriter {
 	return &RunWriter{
+		messages:   make([]map[string]any, 0),
 		lastFlush:  time.Now(),
 		flushEvery: flushEvery,
 		flush:      flush,

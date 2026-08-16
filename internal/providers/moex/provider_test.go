@@ -301,7 +301,7 @@ func TestFetchFundUnitDailyPricesDoesNotRequestCurrentMoscowDay(t *testing.T) {
 	}
 }
 
-func TestFetchRateUSDRUBResolvesCurrencyBoard(t *testing.T) {
+func TestFetchRateUSDRUBUsesCETS(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -309,22 +309,14 @@ func TestFetchRateUSDRUBResolvesCurrencyBoard(t *testing.T) {
 			t.Fatalf("User-Agent = %q, want %q", got, providers.UserAgent)
 		}
 
-		switch request.URL.Path {
-		case "/iss/securities/USD000UTSTOM.json":
-			_, _ = writer.Write([]byte(`{
-				"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[
-					["OTHER","stock","shares",1,1,"RUB"],
-					["CETS","currency","selt",1,1,"SUR"]
-				]}
-			}`))
-		case "/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM/securities.json":
-			_, _ = writer.Write([]byte(`{
-				"marketdata":{"columns":["LAST","TIME","SYSTIME"],"data":[[79.1250,"18:42:31","2026-08-15 18:42:40"]]},
-				"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[78.95,"2026-08-14"]]}
-			}`))
-		default:
+		if request.URL.Path != "/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM/securities.json" {
 			t.Fatalf("unexpected path = %q", request.URL.Path)
 		}
+
+		_, _ = writer.Write([]byte(`{
+			"marketdata":{"columns":["LAST","TIME","SYSTIME"],"data":[[79.1250,"18:42:31","2026-08-15 18:42:40"]]},
+			"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[78.95,"2026-08-14"]]}
+		}`))
 	}))
 	defer server.Close()
 
@@ -350,50 +342,5 @@ func TestFetchRateRejectsUnsupportedPair(t *testing.T) {
 	provider := NewProvider("http://127.0.0.1", &http.Client{})
 	if _, err := provider.FetchRate(context.Background(), "EUR", "RUB"); err == nil {
 		t.Fatal("FetchRate() error = nil")
-	}
-}
-
-func TestPrimaryBoardCacheIsSeparatedBySecurity(t *testing.T) {
-	t.Parallel()
-
-	var fundBoards atomic.Int32
-	var fxBoards atomic.Int32
-
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/iss/securities/RU000A101NK4.json":
-			fundBoards.Add(1)
-			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["TQBR","stock","shares",1,1,"RUB"]]}}`))
-		case "/iss/engines/stock/markets/shares/boards/TQBR/securities/RU000A101NK4/securities.json":
-			_, _ = writer.Write([]byte(`{"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[3200,"2026-08-15","12:00:00"]]},"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[]}}`))
-		case "/iss/securities/USD000UTSTOM.json":
-			fxBoards.Add(1)
-			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["CETS","currency","selt",1,1,"RUB"]]}}`))
-		case "/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM/securities.json":
-			_, _ = writer.Write([]byte(`{"marketdata":{"columns":["LAST","TRADEDATE","UPDATETIME"],"data":[[80,"2026-08-15","12:00:00"]]},"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[]}}`))
-		default:
-			t.Fatalf("unexpected path = %q", request.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	provider := NewProvider(server.URL, server.Client())
-	provider.now = func() time.Time { return time.Date(2026, time.August, 15, 10, 0, 0, 0, time.UTC) }
-
-	if _, err := provider.FetchFundUnitQuote(context.Background()); err != nil {
-		t.Fatalf("FetchFundUnitQuote() error = %v", err)
-	}
-	if _, err := provider.FetchRate(context.Background(), "USD", "RUB"); err != nil {
-		t.Fatalf("FetchRate() error = %v", err)
-	}
-	if _, err := provider.FetchFundUnitQuote(context.Background()); err != nil {
-		t.Fatalf("second FetchFundUnitQuote() error = %v", err)
-	}
-	if _, err := provider.FetchRate(context.Background(), "USD", "RUB"); err != nil {
-		t.Fatalf("second FetchRate() error = %v", err)
-	}
-
-	if fundBoards.Load() != 1 || fxBoards.Load() != 1 {
-		t.Fatalf("board requests: fund=%d fx=%d, want 1/1", fundBoards.Load(), fxBoards.Load())
 	}
 }

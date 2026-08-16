@@ -29,6 +29,7 @@ const (
 	maxHistoryPages = 100
 
 	usdRUBSecurityID = "USD000UTSTOM"
+	usdRUBBoardID    = "CETS"
 )
 
 var moscowLocation = time.FixedZone("MSK", 3*60*60)
@@ -141,7 +142,10 @@ func (p *Provider) FetchRate(ctx context.Context, baseCurrency string, quoteCurr
 		return nil, fmt.Errorf("unsupported MOEX FX pair %s/%s", base, quoteCurrencyNormalized)
 	}
 
-	quote, err := p.fetchQuoteWithBoardRefresh(ctx, usdRUBSecurity)
+	quote, err := p.fetchQuote(ctx, usdRUBSecurity, board{
+		ID:       usdRUBBoardID,
+		Currency: currency.RUB,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("fetch MOEX USD/RUB quote: %w", err)
 	}
