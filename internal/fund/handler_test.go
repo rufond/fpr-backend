@@ -118,6 +118,53 @@ func TestHandlerHistoryRejectsInvalidFromType(t *testing.T) {
 	}
 }
 
+func TestHandlerMarketHistory(t *testing.T) {
+	t.Parallel()
+
+	handler := NewHandler(NewService(nil, nil, testStateManager(t, 15)))
+	status, err, content := handler.MarketHistory(routes.Request{
+		Body: map[string]any{"from": "2026-08-14T15:00:00Z"},
+	})
+	if err != nil {
+		t.Fatalf("MarketHistory() error = %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want %d", status, http.StatusOK)
+	}
+
+	result, ok := content.(*MarketHistoryResult)
+	if !ok {
+		t.Fatalf("content = %T, want *MarketHistoryResult", content)
+	}
+	if len(result.UnitPrices) != 2 || result.UnitPrices[0].UnitValue != "3200" {
+		t.Fatalf("unit prices = %#v", result.UnitPrices)
+	}
+}
+
+func TestHandlerMarketHistoryRejectsInvalidFrom(t *testing.T) {
+	t.Parallel()
+
+	handler := NewHandler(NewService(nil, nil, testStateManager(t, 15)))
+	status, err, content := handler.MarketHistory(routes.Request{
+		Body: map[string]any{"from": "2026-08-14 15:00:00"},
+	})
+	if err != nil {
+		t.Fatalf("MarketHistory() error = %v", err)
+	}
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", status, http.StatusUnprocessableEntity)
+	}
+
+	body, ok := content.(map[string]any)
+	if !ok {
+		t.Fatalf("content = %T, want map[string]any", content)
+	}
+	errorsMap, ok := body["errors"].(map[string]string)
+	if !ok || errorsMap["from"] != "invalid time, expected RFC3339" {
+		t.Fatalf("content = %#v", content)
+	}
+}
+
 func TestHandlerStateUnavailable(t *testing.T) {
 	t.Parallel()
 

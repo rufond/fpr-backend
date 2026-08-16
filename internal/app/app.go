@@ -127,6 +127,11 @@ func (a *App) Routes() []routes.Route {
 			Handler: a.fund.Handler.History,
 		},
 		{
+			Method:  http.MethodPost,
+			Path:    "/api/v1/fund/market-history",
+			Handler: a.fund.Handler.MarketHistory,
+		},
+		{
 			Method:       http.MethodGet,
 			Path:         "/api/v1/admin/scheduler/jobs",
 			AuthRequired: true,

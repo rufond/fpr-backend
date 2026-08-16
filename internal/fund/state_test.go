@@ -100,6 +100,41 @@ func TestServiceHistoryFiltersFromDateInclusively(t *testing.T) {
 	}
 }
 
+func TestServiceMarketHistoryReturnsFullRetainedSeries(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(nil, nil, testStateManager(t, 15))
+	result, err := service.MarketHistory(nil)
+	if err != nil {
+		t.Fatalf("MarketHistory() error = %v", err)
+	}
+
+	if len(result.UnitPrices) != 3 {
+		t.Fatalf("unit prices len = %d, want 3", len(result.UnitPrices))
+	}
+	if result.UnitPrices[0].UnitValue != "3190" || result.UnitPrices[2].UnitValue != "3210.5" {
+		t.Fatalf("unit prices = %#v", result.UnitPrices)
+	}
+}
+
+func TestServiceMarketHistoryFiltersFromTimeInclusively(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(nil, nil, testStateManager(t, 15))
+	from := time.Date(2026, time.August, 14, 15, 0, 0, 0, time.UTC)
+
+	result, err := service.MarketHistory(&from)
+	if err != nil {
+		t.Fatalf("MarketHistory() error = %v", err)
+	}
+	if len(result.UnitPrices) != 2 {
+		t.Fatalf("unit prices len = %d, want 2", len(result.UnitPrices))
+	}
+	if !result.UnitPrices[0].PricedAt.Equal(from) || result.UnitPrices[1].UnitValue != "3210.5" {
+		t.Fatalf("unit prices = %#v", result.UnitPrices)
+	}
+}
+
 func TestServiceStateAndHistoryDoNotExposeMutableRAMSlices(t *testing.T) {
 	t.Parallel()
 
@@ -114,11 +149,16 @@ func TestServiceStateAndHistoryDoNotExposeMutableRAMSlices(t *testing.T) {
 	if errHistory != nil {
 		t.Fatalf("History() error = %v", errHistory)
 	}
+	marketHistory, errMarketHistory := service.MarketHistory(nil)
+	if errMarketHistory != nil {
+		t.Fatalf("MarketHistory() error = %v", errMarketHistory)
+	}
 
 	state.OfficialSnapshot.Assets[0].SourceType = "changed"
 	state.OfficialSnapshot.Categories[0].SourceName = "changed"
 	history.DailyValues[0].NAVUSD = "1"
 	history.UnitMarketPrices[0].UnitValue = "1"
+	marketHistory.UnitPrices[0].UnitValue = "1"
 
 	stateAgain, errStateAgain := service.State()
 	if errStateAgain != nil {
@@ -128,12 +168,17 @@ func TestServiceStateAndHistoryDoNotExposeMutableRAMSlices(t *testing.T) {
 	if errHistoryAgain != nil {
 		t.Fatalf("second History() error = %v", errHistoryAgain)
 	}
+	marketHistoryAgain, errMarketHistoryAgain := service.MarketHistory(nil)
+	if errMarketHistoryAgain != nil {
+		t.Fatalf("second MarketHistory() error = %v", errMarketHistoryAgain)
+	}
 
 	if stateAgain.OfficialSnapshot.Assets[0].SourceType != "Акции" ||
 		stateAgain.OfficialSnapshot.Categories[0].SourceName != "Акции" ||
 		historyAgain.DailyValues[0].NAVUSD != "470000000.00" ||
-		historyAgain.UnitMarketPrices[0].UnitValue != "3100" {
-		t.Fatalf("public result mutated RAM state: state=%#v history=%#v", stateAgain, historyAgain)
+		historyAgain.UnitMarketPrices[0].UnitValue != "3100" ||
+		marketHistoryAgain.UnitPrices[0].UnitValue != "3190" {
+		t.Fatalf("public result mutated RAM state: state=%#v history=%#v market_history=%#v", stateAgain, historyAgain, marketHistoryAgain)
 	}
 }
 
@@ -149,6 +194,11 @@ func TestServiceStateUnavailable(t *testing.T) {
 	_, errHistory := service.History(nil)
 	if !errors.Is(errHistory, ErrStateUnavailable) {
 		t.Fatalf("History() error = %v, want ErrStateUnavailable", errHistory)
+	}
+
+	_, errMarketHistory := service.MarketHistory(nil)
+	if !errors.Is(errMarketHistory, ErrStateUnavailable) {
+		t.Fatalf("MarketHistory() error = %v, want ErrStateUnavailable", errMarketHistory)
 	}
 }
 
@@ -251,6 +301,22 @@ func testStateManager(t *testing.T, instrumentID int64) *appstate.Manager {
 						{PriceDate: time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC), UnitValue: "3100", Currency: "RUB"},
 						{PriceDate: time.Date(2026, time.August, 11, 0, 0, 0, 0, time.UTC), UnitValue: "3150", Currency: "RUB"},
 						{PriceDate: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC), UnitValue: "3200", Currency: "RUB"},
+					},
+				},
+			},
+			Points: map[int64]appstate.InstrumentPricePointSeries{
+				101: {
+					PriceSourceID:  101,
+					InstrumentID:   99,
+					AssetType:      "fund_unit",
+					ISIN:           "RU000A101NK4",
+					Name:           "Фонд первичных размещений",
+					Provider:       "moex",
+					ProviderSymbol: "RU000A101NK4",
+					Items: []appstate.InstrumentPricePoint{
+						{UnitValue: "3190", Currency: "RUB", PricedAt: time.Date(2026, time.August, 14, 14, 30, 0, 0, time.UTC), ObservedAt: time.Date(2026, time.August, 14, 14, 30, 1, 0, time.UTC)},
+						{UnitValue: "3200", Currency: "RUB", PricedAt: time.Date(2026, time.August, 14, 15, 0, 0, 0, time.UTC), ObservedAt: time.Date(2026, time.August, 14, 15, 0, 1, 0, time.UTC)},
+						{UnitValue: "3210.5", Currency: "RUB", PricedAt: time.Date(2026, time.August, 14, 15, 42, 31, 0, time.UTC), ObservedAt: time.Date(2026, time.August, 14, 15, 42, 35, 0, time.UTC)},
 					},
 				},
 			},

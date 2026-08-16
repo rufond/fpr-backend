@@ -34,7 +34,6 @@ type fakePriceRepository struct {
 
 	applyChanged bool
 	applyStale   bool
-	applyState   *appstate.PriceState
 	applyPrice   appstate.InstrumentPrice
 	applyErr     error
 
@@ -57,8 +56,8 @@ func (r *fakePriceRepository) ApplyFundUnitMOEXQuote(
 	context.Context,
 	SourceQuote,
 	time.Time,
-) (bool, bool, *appstate.PriceState, appstate.InstrumentPrice, error) {
-	return r.applyChanged, r.applyStale, r.applyState, r.applyPrice, r.applyErr
+) (bool, bool, appstate.InstrumentPrice, error) {
+	return r.applyChanged, r.applyStale, r.applyPrice, r.applyErr
 }
 
 func (r *fakePriceRepository) ApplyFundUnitMOEXDailyPrices(
@@ -91,9 +90,21 @@ func TestServiceStartLoadsPricesIntoExistingApplicationState(t *testing.T) {
 				},
 			},
 		},
+		Points: map[int64]appstate.InstrumentPricePointSeries{
+			7: {
+				PriceSourceID: 7,
+				ISIN:          FundUnitISIN,
+				Provider:      ProviderMOEX,
+				Items: []appstate.InstrumentPricePoint{
+					{UnitValue: "3190", Currency: "RUB", PricedAt: time.Date(2026, time.August, 12, 10, 0, 0, 0, time.UTC), ObservedAt: time.Date(2026, time.August, 12, 10, 0, 5, 0, time.UTC)},
+					{UnitValue: "3200", Currency: "RUB", PricedAt: time.Date(2026, time.August, 14, 10, 0, 0, 0, time.UTC), ObservedAt: time.Date(2026, time.August, 14, 10, 0, 5, 0, time.UTC)},
+				},
+			},
+		},
 	}
 	repository := &fakePriceRepository{loadState: priceState}
 	service := NewService(repository, nil, manager)
+	service.now = func() time.Time { return time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC) }
 
 	if err := service.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -102,6 +113,9 @@ func TestServiceStartLoadsPricesIntoExistingApplicationState(t *testing.T) {
 	current := manager.Load()
 	if current == nil || current.Fund == nil || current.Prices != priceState {
 		t.Fatalf("state = %#v", current)
+	}
+	if len(current.Prices.Points[7].Items) != 1 || current.Prices.Points[7].Items[0].UnitValue != "3200" {
+		t.Fatalf("retained price points = %#v", current.Prices.Points[7].Items)
 	}
 }
 
@@ -112,27 +126,42 @@ func TestSyncFundUnitMOEXPublishesRAMOnlyAfterRepositorySuccess(t *testing.T) {
 	dailyPrices := map[int64]appstate.InstrumentDailyPriceSeries{
 		7: {PriceSourceID: 7, ISIN: FundUnitISIN, Provider: ProviderMOEX},
 	}
+	initialPoints := map[int64]appstate.InstrumentPricePointSeries{
+		7: {
+			PriceSourceID: 7,
+			InstrumentID:  7,
+			ISIN:          FundUnitISIN,
+			Provider:      ProviderMOEX,
+			Items: []appstate.InstrumentPricePoint{
+				{UnitValue: "3200", Currency: "RUB", PricedAt: time.Date(2026, time.August, 14, 15, 40, 0, 0, time.UTC), ObservedAt: time.Date(2026, time.August, 14, 15, 40, 1, 0, time.UTC)},
+			},
+		},
+	}
 	initialPrices := &appstate.PriceState{
 		Sources:     map[int64]appstate.InstrumentPrice{},
 		DailyPrices: dailyPrices,
+		Points:      initialPoints,
 	}
 	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{}, Prices: initialPrices}); err != nil {
 		t.Fatalf("Initialize() error = %v", err)
 	}
 
 	pricedAt := time.Date(2026, time.August, 14, 15, 42, 31, 0, time.UTC)
+	fetchedAt := time.Date(2026, time.August, 14, 15, 42, 35, 0, time.UTC)
 	price := appstate.InstrumentPrice{
-		InstrumentID: 7,
-		ISIN:         FundUnitISIN,
-		Provider:     ProviderMOEX,
-		UnitValue:    "3210.5",
-		Currency:     "RUB",
-		PricedAt:     pricedAt,
+		PriceSourceID:  7,
+		InstrumentID:   7,
+		AssetType:      FundUnitAssetType,
+		ISIN:           FundUnitISIN,
+		Name:           FundUnitName,
+		Provider:       ProviderMOEX,
+		ProviderSymbol: FundUnitISIN,
+		UnitValue:      "3210.5",
+		Currency:       "RUB",
+		PricedAt:       pricedAt,
 	}
-	nextPrices := &appstate.PriceState{Sources: map[int64]appstate.InstrumentPrice{7: price}}
 	repository := &fakePriceRepository{
 		applyChanged: true,
-		applyState:   nextPrices,
 		applyPrice:   price,
 	}
 	source := &fakeSource{quote: &SourceQuote{
@@ -142,6 +171,7 @@ func TestSyncFundUnitMOEXPublishesRAMOnlyAfterRepositorySuccess(t *testing.T) {
 		Source:    "last",
 	}}
 	service := NewService(repository, source, manager)
+	service.now = func() time.Time { return fetchedAt }
 
 	result, err := service.SyncFundUnitMOEX(context.Background())
 	if err != nil {
@@ -150,11 +180,23 @@ func TestSyncFundUnitMOEXPublishesRAMOnlyAfterRepositorySuccess(t *testing.T) {
 	if !result.Changed || result.Price.InstrumentID != 7 {
 		t.Fatalf("result = %#v", result)
 	}
-	if manager.Load().Prices != nextPrices {
-		t.Fatalf("Prices = %#v, want %#v", manager.Load().Prices, nextPrices)
+
+	current := manager.Load()
+	if current.Prices == initialPrices {
+		t.Fatal("changed quote kept old price-state pointer")
 	}
-	if len(nextPrices.DailyPrices) != 1 || nextPrices.DailyPrices[7].PriceSourceID != 7 {
-		t.Fatalf("daily prices were not preserved: %#v", nextPrices.DailyPrices)
+	if current.Prices.Sources[7].UnitValue != "3210.5" {
+		t.Fatalf("current price = %#v", current.Prices.Sources[7])
+	}
+	if current.Prices.DailyPrices[7].PriceSourceID != 7 {
+		t.Fatalf("daily prices were not preserved: %#v", current.Prices.DailyPrices)
+	}
+	points := current.Prices.Points[7].Items
+	if len(points) != 2 || points[1].UnitValue != "3210.5" || !points[1].ObservedAt.Equal(fetchedAt) {
+		t.Fatalf("price points = %#v", points)
+	}
+	if len(initialPrices.Points[7].Items) != 1 {
+		t.Fatalf("previous RAM state was mutated: %#v", initialPrices.Points[7].Items)
 	}
 }
 

@@ -34,6 +34,7 @@ type FXRate struct {
 type PriceState struct {
 	Sources     map[int64]InstrumentPrice
 	DailyPrices map[int64]InstrumentDailyPriceSeries
+	Points      map[int64]InstrumentPricePointSeries
 }
 
 type InstrumentDailyPriceSeries struct {
@@ -54,6 +55,27 @@ type InstrumentDailyPrice struct {
 	PriceDate time.Time
 	UnitValue string
 	Currency  string
+}
+
+type InstrumentPricePointSeries struct {
+	PriceSourceID int64
+	InstrumentID  int64
+
+	AssetType string
+	ISIN      string
+	Name      string
+
+	Provider       string
+	ProviderSymbol string
+
+	Items []InstrumentPricePoint
+}
+
+type InstrumentPricePoint struct {
+	UnitValue  string
+	Currency   string
+	PricedAt   time.Time
+	ObservedAt time.Time
 }
 
 type InstrumentPrice struct {

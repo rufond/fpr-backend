@@ -23,6 +23,10 @@ type HistoryRequest struct {
 	From string `json:"from"`
 }
 
+type MarketHistoryRequest struct {
+	From string `json:"from"`
+}
+
 func (h *Handler) State(_ routes.Request) (int, error, any) {
 	result, err := h.service.State()
 	if err != nil {
@@ -57,6 +61,36 @@ func (h *Handler) History(request routes.Request) (int, error, any) {
 	}
 
 	result, err := h.service.History(from)
+	if err != nil {
+		return stateError(err)
+	}
+
+	return http.StatusOK, nil, result
+}
+
+func (h *Handler) MarketHistory(request routes.Request) (int, error, any) {
+	r, validationErrors := govalidate.Run[MarketHistoryRequest](request.Body, map[string][]any{
+		"from": {rules.String{}},
+	})
+	if len(validationErrors) != 0 {
+		return http.StatusUnprocessableEntity, nil, map[string]any{"errors": validationErrors}
+	}
+
+	var from *time.Time
+	fromText := strings.TrimSpace(r.From)
+	if fromText != "" {
+		fromTime, errParse := time.Parse(time.RFC3339, fromText)
+		if errParse != nil {
+			return http.StatusUnprocessableEntity, nil, map[string]any{
+				"errors": map[string]string{
+					"from": "invalid time, expected RFC3339",
+				},
+			}
+		}
+		from = new(fromTime)
+	}
+
+	result, err := h.service.MarketHistory(from)
 	if err != nil {
 		return stateError(err)
 	}

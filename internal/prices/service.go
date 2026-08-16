@@ -3,6 +3,7 @@ package prices
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ type serviceRepository interface {
 		ctx context.Context,
 		quote SourceQuote,
 		fetchedAt time.Time,
-	) (changed bool, stale bool, state *appstate.PriceState, price appstate.InstrumentPrice, err error)
+	) (changed bool, stale bool, price appstate.InstrumentPrice, err error)
 	ApplyFundUnitMOEXDailyPrices(
 		ctx context.Context,
 		items []SourceDailyPrice,
@@ -60,6 +61,16 @@ func (s *Service) Start(ctx context.Context) error {
 	priceState, err := s.repository.LoadState(ctx)
 	if err != nil {
 		return err
+	}
+
+	cutoff := s.now().UTC().Add(-pricePointRetention)
+	for priceSourceID, series := range priceState.Points {
+		series.Items = retainedPricePoints(series.Items, cutoff)
+		if len(series.Items) == 0 {
+			delete(priceState.Points, priceSourceID)
+			continue
+		}
+		priceState.Points[priceSourceID] = series
 	}
 
 	return s.state.Update(func(current *appstate.State) (*appstate.State, error) {
@@ -103,7 +114,7 @@ func (s *Service) SyncFundUnitMOEX(ctx context.Context) (*SyncResult, error) {
 			return nil, fmt.Errorf("application state is not initialized")
 		}
 
-		changed, stale, priceState, price, errApply := s.repository.ApplyFundUnitMOEXQuote(ctx, *quote, fetchedAt)
+		changed, stale, price, errApply := s.repository.ApplyFundUnitMOEXQuote(ctx, *quote, fetchedAt)
 		if errApply != nil {
 			return nil, errApply
 		}
@@ -115,12 +126,47 @@ func (s *Service) SyncFundUnitMOEX(ctx context.Context) (*SyncResult, error) {
 		if !changed {
 			return current, nil
 		}
-		if priceState == nil {
-			return nil, fmt.Errorf("MOEX quote update returned no price state")
+
+		priceState := &appstate.PriceState{
+			Sources: map[int64]appstate.InstrumentPrice{},
+			Points:  map[int64]appstate.InstrumentPricePointSeries{},
 		}
 		if current.Prices != nil {
+			priceState.Sources = maps.Clone(current.Prices.Sources)
 			priceState.DailyPrices = current.Prices.DailyPrices
+			priceState.Points = maps.Clone(current.Prices.Points)
 		}
+		if priceState.Sources == nil {
+			priceState.Sources = map[int64]appstate.InstrumentPrice{}
+		}
+		if priceState.Points == nil {
+			priceState.Points = map[int64]appstate.InstrumentPricePointSeries{}
+		}
+
+		priceState.Sources[price.PriceSourceID] = price
+
+		series, exists := priceState.Points[price.PriceSourceID]
+		if !exists {
+			series = appstate.InstrumentPricePointSeries{
+				PriceSourceID:  price.PriceSourceID,
+				InstrumentID:   price.InstrumentID,
+				AssetType:      price.AssetType,
+				ISIN:           price.ISIN,
+				Name:           price.Name,
+				Provider:       price.Provider,
+				ProviderSymbol: price.ProviderSymbol,
+			}
+		} else {
+			series.Items = slices.Clone(series.Items)
+		}
+		series.Items = append(series.Items, appstate.InstrumentPricePoint{
+			UnitValue:  price.UnitValue,
+			Currency:   price.Currency,
+			PricedAt:   price.PricedAt,
+			ObservedAt: fetchedAt,
+		})
+		series.Items = retainedPricePoints(series.Items, fetchedAt.Add(-pricePointRetention))
+		priceState.Points[price.PriceSourceID] = series
 
 		next := new(*current)
 		next.Prices = priceState
@@ -185,6 +231,10 @@ func (s *Service) SyncFundUnitMOEXHistory(ctx context.Context) (*DailySyncResult
 			return nil, fmt.Errorf("MOEX daily price update returned no price state")
 		}
 
+		if currentState.Prices != nil {
+			priceState.Points = currentState.Prices.Points
+		}
+
 		next := new(*currentState)
 		next.Prices = priceState
 		return next, nil
@@ -194,6 +244,12 @@ func (s *Service) SyncFundUnitMOEXHistory(ctx context.Context) (*DailySyncResult
 	}
 
 	return result, nil
+}
+
+func retainedPricePoints(items []appstate.InstrumentPricePoint, cutoff time.Time) []appstate.InstrumentPricePoint {
+	return slices.DeleteFunc(items, func(item appstate.InstrumentPricePoint) bool {
+		return item.ObservedAt.Before(cutoff)
+	})
 }
 
 func fundUnitMOEXHistoryFrom(state *appstate.PriceState) time.Time {

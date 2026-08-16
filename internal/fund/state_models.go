@@ -12,6 +12,10 @@ type HistoryResult struct {
 	UnitMarketPrices []StateDailyMarketPrice `json:"unit_market_prices"`
 }
 
+type MarketHistoryResult struct {
+	UnitPrices []StateIntradayMarketPrice `json:"unit_prices"`
+}
+
 type StateMarket struct {
 	UnitPrice *StateMarketPrice `json:"unit_price"`
 	USDRUB    *StateFXRate      `json:"usd_rub"`
@@ -78,4 +82,10 @@ type StateDailyMarketPrice struct {
 	AsOfDate  string `json:"as_of_date"`
 	UnitValue string `json:"unit_value"`
 	Currency  string `json:"currency"`
+}
+
+type StateIntradayMarketPrice struct {
+	UnitValue string    `json:"unit_value"`
+	Currency  string    `json:"currency"`
+	PricedAt  time.Time `json:"priced_at"`
 }

@@ -65,6 +65,23 @@ type storedDailyPriceState struct {
 	Currency  string    `db:"currency"`
 }
 
+type storedPricePointState struct {
+	PriceSourceID int64 `db:"price_source_id"`
+	InstrumentID  int64 `db:"instrument_id"`
+
+	AssetType string `db:"asset_type"`
+	ISIN      string `db:"isin"`
+	Name      string `db:"name"`
+
+	Provider       string `db:"provider"`
+	ProviderSymbol string `db:"provider_symbol"`
+
+	UnitValue  string    `db:"unit_value"`
+	Currency   string    `db:"currency"`
+	PricedAt   time.Time `db:"priced_at"`
+	ObservedAt time.Time `db:"observed_at"`
+}
+
 type storedPriceState struct {
 	PriceSourceID int64 `db:"price_source_id"`
 	InstrumentID  int64 `db:"instrument_id"`
@@ -112,32 +129,32 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 	ctx context.Context,
 	quote SourceQuote,
 	fetchedAt time.Time,
-) (bool, bool, *appstate.PriceState, appstate.InstrumentPrice, error) {
+) (bool, bool, appstate.InstrumentPrice, error) {
 	tx, errBegin := r.db.Begin(ctx)
 	if errBegin != nil {
-		return false, false, nil, appstate.InstrumentPrice{}, fmt.Errorf("begin MOEX fund unit quote transaction: %w", errBegin)
+		return false, false, appstate.InstrumentPrice{}, fmt.Errorf("begin MOEX fund unit quote transaction: %w", errBegin)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	priceSourceID, errSource := ensureFundUnitMOEXSource(ctx, tx)
 	if errSource != nil {
-		return false, false, nil, appstate.InstrumentPrice{}, errSource
+		return false, false, appstate.InstrumentPrice{}, errSource
 	}
 
 	stored, errStored := loadCurrentPrice(ctx, tx, priceSourceID)
 	if errStored != nil && !errors.Is(errStored, pgx.ErrNoRows) {
-		return false, false, nil, appstate.InstrumentPrice{}, errStored
+		return false, false, appstate.InstrumentPrice{}, errStored
 	}
 
 	if stored != nil && quote.PricedAt.Before(stored.PricedAt) {
 		price, errPrice := loadInstrumentPrice(ctx, tx, priceSourceID)
 		if errPrice != nil {
-			return false, false, nil, appstate.InstrumentPrice{}, errPrice
+			return false, false, appstate.InstrumentPrice{}, errPrice
 		}
 		if errCommit := tx.Commit(ctx); errCommit != nil {
-			return false, false, nil, appstate.InstrumentPrice{}, fmt.Errorf("commit stale MOEX fund unit quote transaction: %w", errCommit)
+			return false, false, appstate.InstrumentPrice{}, fmt.Errorf("commit stale MOEX fund unit quote transaction: %w", errCommit)
 		}
-		return false, true, nil, price, nil
+		return false, true, price, nil
 	}
 
 	if stored != nil &&
@@ -146,39 +163,34 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 		stored.PricedAt.Equal(quote.PricedAt) {
 		price, errPrice := loadInstrumentPrice(ctx, tx, priceSourceID)
 		if errPrice != nil {
-			return false, false, nil, appstate.InstrumentPrice{}, errPrice
+			return false, false, appstate.InstrumentPrice{}, errPrice
 		}
 		if errCommit := tx.Commit(ctx); errCommit != nil {
-			return false, false, nil, appstate.InstrumentPrice{}, fmt.Errorf("commit unchanged MOEX fund unit quote transaction: %w", errCommit)
+			return false, false, appstate.InstrumentPrice{}, fmt.Errorf("commit unchanged MOEX fund unit quote transaction: %w", errCommit)
 		}
-		return false, false, nil, price, nil
+		return false, false, price, nil
 	}
 
 	if errPersist := persistCurrentPrice(ctx, tx, priceSourceID, quote, fetchedAt, stored != nil); errPersist != nil {
-		return false, false, nil, appstate.InstrumentPrice{}, errPersist
+		return false, false, appstate.InstrumentPrice{}, errPersist
 	}
 	if errPoint := insertPricePoint(ctx, tx, priceSourceID, quote, fetchedAt); errPoint != nil {
-		return false, false, nil, appstate.InstrumentPrice{}, errPoint
+		return false, false, appstate.InstrumentPrice{}, errPoint
 	}
 	if errCleanup := deleteOldPricePoints(ctx, tx, priceSourceID, fetchedAt.Add(-pricePointRetention)); errCleanup != nil {
-		return false, false, nil, appstate.InstrumentPrice{}, errCleanup
+		return false, false, appstate.InstrumentPrice{}, errCleanup
 	}
 
-	state, errState := loadCurrentPriceStateSnapshot(ctx, tx)
-	if errState != nil {
-		return false, false, nil, appstate.InstrumentPrice{}, fmt.Errorf("build current price state after MOEX fund unit quote: %w", errState)
-	}
-
-	price, ok := state.Sources[priceSourceID]
-	if !ok {
-		return false, false, nil, appstate.InstrumentPrice{}, fmt.Errorf("MOEX fund unit price is missing from rebuilt state")
+	price, errPrice := loadInstrumentPrice(ctx, tx, priceSourceID)
+	if errPrice != nil {
+		return false, false, appstate.InstrumentPrice{}, errPrice
 	}
 
 	if errCommit := tx.Commit(ctx); errCommit != nil {
-		return false, false, nil, appstate.InstrumentPrice{}, fmt.Errorf("commit MOEX fund unit quote transaction: %w", errCommit)
+		return false, false, appstate.InstrumentPrice{}, fmt.Errorf("commit MOEX fund unit quote transaction: %w", errCommit)
 	}
 
-	return true, false, state, price, nil
+	return true, false, price, nil
 }
 
 func (r *Repository) ApplyFundUnitMOEXDailyPrices(
@@ -240,9 +252,15 @@ func (r *Repository) ApplyFundUnitMOEXDailyPrices(
 		return 0, 0, nil, nil
 	}
 
-	state, errState := loadPriceState(ctx, tx)
-	if errState != nil {
-		return 0, 0, nil, fmt.Errorf("build price state after MOEX fund unit daily prices: %w", errState)
+	state := &appstate.PriceState{
+		Sources:     map[int64]appstate.InstrumentPrice{},
+		DailyPrices: map[int64]appstate.InstrumentDailyPriceSeries{},
+	}
+	if errCurrent := loadCurrentPriceState(ctx, tx, state); errCurrent != nil {
+		return 0, 0, nil, fmt.Errorf("build current price state after MOEX fund unit daily prices: %w", errCurrent)
+	}
+	if errDaily := loadDailyPriceState(ctx, tx, state); errDaily != nil {
+		return 0, 0, nil, fmt.Errorf("build daily price state after MOEX fund unit daily prices: %w", errDaily)
 	}
 
 	if errCommit := tx.Commit(ctx); errCommit != nil {
@@ -584,22 +602,11 @@ func updateDailyPrice(ctx context.Context, tx pgx.Tx, priceSourceID int64, item 
 	return nil
 }
 
-func loadCurrentPriceStateSnapshot(ctx context.Context, db priceQueryer) (*appstate.PriceState, error) {
-	state := &appstate.PriceState{
-		Sources: map[int64]appstate.InstrumentPrice{},
-	}
-
-	if errCurrent := loadCurrentPriceState(ctx, db, state); errCurrent != nil {
-		return nil, errCurrent
-	}
-
-	return state, nil
-}
-
 func loadPriceState(ctx context.Context, db priceQueryer) (*appstate.PriceState, error) {
 	state := &appstate.PriceState{
 		Sources:     map[int64]appstate.InstrumentPrice{},
 		DailyPrices: map[int64]appstate.InstrumentDailyPriceSeries{},
+		Points:      map[int64]appstate.InstrumentPricePointSeries{},
 	}
 
 	if errCurrent := loadCurrentPriceState(ctx, db, state); errCurrent != nil {
@@ -607,6 +614,9 @@ func loadPriceState(ctx context.Context, db priceQueryer) (*appstate.PriceState,
 	}
 	if errDaily := loadDailyPriceState(ctx, db, state); errDaily != nil {
 		return nil, errDaily
+	}
+	if errPoints := loadPricePointState(ctx, db, state); errPoints != nil {
+		return nil, errPoints
 	}
 
 	return state, nil
@@ -724,6 +734,78 @@ func loadDailyPriceState(ctx context.Context, db priceQueryer, state *appstate.P
 			Currency:  item.Currency,
 		})
 		state.DailyPrices[item.PriceSourceID] = series
+	}
+
+	return nil
+}
+
+func loadPricePointState(ctx context.Context, db priceQueryer, state *appstate.PriceState) error {
+	instruments := builder.NewTable("instruments")
+	sources := builder.NewTable("instrument_price_sources")
+	points := builder.NewTable("instrument_price_points")
+
+	query := builder.NewSelect()
+	query.From(points)
+	query.LeftJoin(sources, builder.OnEq{Table1: points, Column1: "price_source_id", Table2: sources, Column2: "id"})
+	query.LeftJoin(instruments, builder.OnEq{Table1: sources, Column1: "instrument_id", Table2: instruments, Column2: "id"})
+	query.Column(
+		builder.ColumnName{Table: points, Name: "price_source_id"},
+		builder.ColumnName{Table: sources, Name: "instrument_id"},
+		builder.ColumnName{Table: instruments, Name: "asset_type"},
+		builder.ColumnName{Table: instruments, Name: "isin"},
+		builder.ColumnName{Table: instruments, Name: "name"},
+		builder.ColumnName{Table: sources, Name: "provider"},
+		builder.ColumnName{Table: sources, Name: "provider_symbol"},
+		builder.ColumnName{Table: points, Name: "unit_value"},
+		builder.ColumnName{Table: points, Name: "currency"},
+		builder.ColumnName{Table: points, Name: "priced_at"},
+		builder.ColumnName{Table: points, Name: "observed_at"},
+	)
+	query.Where(builder.WhereEq{Table: sources, Column: "enabled", Value: true})
+	query.Order(
+		builder.Order{Table: points, Column: "price_source_id"},
+		builder.Order{Table: points, Column: "observed_at"},
+		builder.Order{Table: points, Column: "priced_at"},
+	)
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return fmt.Errorf("build price point state query: %w", errBuild)
+	}
+
+	rows, errQuery := db.Query(ctx, sql, pgx.NamedArgs(binds))
+	if errQuery != nil {
+		return fmt.Errorf("query price point state: %w", errQuery)
+	}
+	defer rows.Close()
+
+	stored, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[storedPricePointState])
+	if errCollect != nil {
+		return fmt.Errorf("collect price point state: %w", errCollect)
+	}
+
+	for _, item := range stored {
+		series, exists := state.Points[item.PriceSourceID]
+		if !exists {
+			series = appstate.InstrumentPricePointSeries{
+				PriceSourceID:  item.PriceSourceID,
+				InstrumentID:   item.InstrumentID,
+				AssetType:      item.AssetType,
+				ISIN:           item.ISIN,
+				Name:           item.Name,
+				Provider:       item.Provider,
+				ProviderSymbol: item.ProviderSymbol,
+				Items:          []appstate.InstrumentPricePoint{},
+			}
+		}
+
+		series.Items = append(series.Items, appstate.InstrumentPricePoint{
+			UnitValue:  item.UnitValue,
+			Currency:   item.Currency,
+			PricedAt:   item.PricedAt.UTC(),
+			ObservedAt: item.ObservedAt.UTC(),
+		})
+		state.Points[item.PriceSourceID] = series
 	}
 
 	return nil

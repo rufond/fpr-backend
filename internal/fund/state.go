@@ -31,6 +31,34 @@ func (s *Service) History(from *time.Time) (*HistoryResult, error) {
 	return buildHistoryResult(state, from), nil
 }
 
+func (s *Service) MarketHistory(from *time.Time) (*MarketHistoryResult, error) {
+	state, err := s.currentState()
+	if err != nil {
+		return nil, err
+	}
+
+	series := stateFundUnitPricePoints(state.Prices)
+	start := 0
+	if from != nil {
+		start, _ = slices.BinarySearchFunc(series, *from, func(item appstate.InstrumentPricePoint, target time.Time) int {
+			return item.PricedAt.Compare(target)
+		})
+	}
+
+	result := &MarketHistoryResult{
+		UnitPrices: make([]StateIntradayMarketPrice, 0, len(series)-start),
+	}
+	for _, item := range series[start:] {
+		result.UnitPrices = append(result.UnitPrices, StateIntradayMarketPrice{
+			UnitValue: item.UnitValue,
+			Currency:  item.Currency,
+			PricedAt:  item.PricedAt,
+		})
+	}
+
+	return result, nil
+}
+
 func (s *Service) currentState() (*appstate.State, error) {
 	if s.state == nil {
 		return nil, fmt.Errorf("application state manager is not configured")
@@ -124,6 +152,20 @@ func buildHistoryResult(state *appstate.State, from *time.Time) *HistoryResult {
 	}
 
 	return result
+}
+
+func stateFundUnitPricePoints(state *appstate.PriceState) []appstate.InstrumentPricePoint {
+	if state == nil {
+		return nil
+	}
+
+	for _, series := range state.Points {
+		if series.ISIN == prices.FundUnitISIN && series.Provider == prices.ProviderMOEX {
+			return series.Items
+		}
+	}
+
+	return nil
 }
 
 func stateFundUnitDailyPrices(state *appstate.PriceState) []appstate.InstrumentDailyPrice {
