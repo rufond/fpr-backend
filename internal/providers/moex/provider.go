@@ -171,7 +171,7 @@ func (p *Provider) ResolveSecuritySymbols(ctx context.Context, isins []string) (
 		query.Set("q", isin)
 		query.Set("iss.meta", "off")
 		query.Set("iss.only", "securities")
-		query.Set("securities.columns", "secid,isin,is_trading,group")
+		query.Set("securities.columns", "secid,isin,is_traded,group")
 		requestURL.RawQuery = query.Encode()
 
 		var payload issSecuritiesResponse
@@ -191,9 +191,9 @@ func (p *Provider) ResolveSecuritySymbols(ctx context.Context, isins []string) (
 				continue
 			}
 
-			isTrading, okTrading := boolFlag(row["is_trading"])
+			isTraded, okTraded := boolFlag(row["is_traded"])
 			group, okGroup := stringValue(row["group"])
-			if !okTrading || !isTrading || !okGroup || group != "stock_shares" {
+			if !okTraded || !isTraded || !okGroup || group != "stock_shares" {
 				continue
 			}
 

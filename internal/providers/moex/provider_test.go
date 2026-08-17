@@ -363,26 +363,26 @@ func TestResolveSecuritySymbolsUsesExactTradedShareISIN(t *testing.T) {
 		if request.URL.Path != "/iss/securities.json" {
 			t.Fatalf("unexpected path = %q", request.URL.Path)
 		}
-		if request.URL.Query().Get("securities.columns") != "secid,isin,is_trading,group" {
+		if request.URL.Query().Get("securities.columns") != "secid,isin,is_traded,group" {
 			t.Fatalf("securities.columns = %q", request.URL.Query().Get("securities.columns"))
 		}
 
 		switch request.URL.Query().Get("q") {
 		case "RU000A0JQ9P9":
 			_, _ = writer.Write([]byte(`{
-				"securities":{"columns":["secid","isin","is_trading","group"],"data":[
+				"securities":{"columns":["secid","isin","is_traded","group"],"data":[
 					["SPBE","RU000A0JQ9P9",1,"stock_shares"],
 					["NOISE","RU000A000000",1,"stock_shares"]
 				]}
 			}`))
 		case "KZ1C00001122":
 			_, _ = writer.Write([]byte(`{
-				"securities":{"columns":["secid","isin","is_trading","group"],"data":[
+				"securities":{"columns":["secid","isin","is_traded","group"],"data":[
 					["KMGZ","KZ1C00001122",0,"stock_shares"]
 				]}
 			}`))
 		case "US00449L1026":
-			_, _ = writer.Write([]byte(`{"securities":{"columns":["secid","isin","is_trading","group"],"data":[]}}`))
+			_, _ = writer.Write([]byte(`{"securities":{"columns":["secid","isin","is_traded","group"],"data":[]}}`))
 		default:
 			t.Fatalf("unexpected q = %q", request.URL.Query().Get("q"))
 		}
