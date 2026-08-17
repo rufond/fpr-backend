@@ -17,6 +17,14 @@ type fakeSource struct {
 	daily     []SourceDailyPrice
 	dailyErr  error
 	dailyFrom time.Time
+
+	resolveResult MOEXSymbolResolutionResult
+	resolveErr    error
+	resolveISINs  []string
+
+	securityResult  MOEXSourceResult
+	securityErr     error
+	securitySymbols []string
 }
 
 func (s *fakeSource) FetchFundUnitQuote(context.Context) (SourceQuote, error) {
@@ -27,6 +35,18 @@ func (s *fakeSource) FetchFundUnitDailyPrices(_ context.Context, from time.Time)
 	s.dailyFrom = from
 
 	return s.daily, s.dailyErr
+}
+
+func (s *fakeSource) ResolveSecuritySymbols(_ context.Context, isins []string) (MOEXSymbolResolutionResult, error) {
+	s.resolveISINs = slices.Clone(isins)
+
+	return s.resolveResult, s.resolveErr
+}
+
+func (s *fakeSource) FetchSecurityPrices(_ context.Context, symbols []string) (MOEXSourceResult, error) {
+	s.securitySymbols = slices.Clone(symbols)
+
+	return s.securityResult, s.securityErr
 }
 
 type fakeYahooSource struct {
@@ -73,17 +93,30 @@ type fakePriceRepository struct {
 	dailyErr      error
 	dailyItems    []SourceDailyPrice
 
-	yahooSources   []yahooPriceSource
-	yahooSourceErr error
-	yahooApplied   []yahooQuoteToApply
-	yahooResult    yahooApplyResult
-	yahooApplyErr  error
+	priceSources   []priceSource
+	priceSourceErr error
+	appliedQuotes  []quoteToApply
+	applyResult    applyQuotesResult
+	quotesApplyErr error
 
-	yahooMappedIDs       map[int64]struct{}
-	yahooMappedErr       error
-	yahooCreatedMappings []yahooSourceMapping
-	yahooCreateCount     int
-	yahooCreateErr       error
+	mappedIDs       map[int64]struct{}
+	mappedErr       error
+	createdMappings []sourceMapping
+	createCount     int
+	createErr       error
+
+	allSources []storedPriceSource
+	allErr     error
+	setStored  storedPriceSource
+	setChanged bool
+	setState   *appstate.PriceState
+	setErr     error
+	setArgs    struct {
+		instrumentID   int64
+		provider       string
+		providerSymbol string
+		enabled        bool
+	}
 }
 
 func (r *fakePriceRepository) EnsureFundUnitMOEXSource(context.Context) (int64, error) {
@@ -96,18 +129,18 @@ func (r *fakePriceRepository) LoadState(context.Context) (*appstate.PriceState, 
 	return r.loadState, r.loadErr
 }
 
-func (r *fakePriceRepository) YahooPriceSources(context.Context) ([]yahooPriceSource, error) {
-	return r.yahooSources, r.yahooSourceErr
+func (r *fakePriceRepository) PriceSources(context.Context, string) ([]priceSource, error) {
+	return r.priceSources, r.priceSourceErr
 }
 
-func (r *fakePriceRepository) YahooMappedInstrumentIDs(context.Context) (map[int64]struct{}, error) {
-	return r.yahooMappedIDs, r.yahooMappedErr
+func (r *fakePriceRepository) MappedInstrumentIDs(context.Context) (map[int64]struct{}, error) {
+	return r.mappedIDs, r.mappedErr
 }
 
-func (r *fakePriceRepository) CreateYahooPriceSources(_ context.Context, items []yahooSourceMapping) (int, error) {
-	r.yahooCreatedMappings = slices.Clone(items)
+func (r *fakePriceRepository) CreatePriceSources(_ context.Context, _ string, items []sourceMapping) (int, error) {
+	r.createdMappings = slices.Clone(items)
 
-	return r.yahooCreateCount, r.yahooCreateErr
+	return r.createCount, r.createErr
 }
 
 func (r *fakePriceRepository) ApplyFundUnitMOEXQuote(
@@ -119,14 +152,34 @@ func (r *fakePriceRepository) ApplyFundUnitMOEXQuote(
 	return r.applyChanged, r.applyStale, r.applyPrice, r.applyErr
 }
 
-func (r *fakePriceRepository) ApplyYahooQuotes(
+func (r *fakePriceRepository) ApplyQuotes(
 	_ context.Context,
-	items []yahooQuoteToApply,
+	_ string,
+	items []quoteToApply,
 	_ time.Time,
-) (yahooApplyResult, error) {
-	r.yahooApplied = slices.Clone(items)
+) (applyQuotesResult, error) {
+	r.appliedQuotes = slices.Clone(items)
 
-	return r.yahooResult, r.yahooApplyErr
+	return r.applyResult, r.quotesApplyErr
+}
+
+func (r *fakePriceRepository) AllPriceSources(context.Context) ([]storedPriceSource, error) {
+	return r.allSources, r.allErr
+}
+
+func (r *fakePriceRepository) SetPriceSource(
+	_ context.Context,
+	instrumentID int64,
+	provider string,
+	providerSymbol string,
+	enabled bool,
+) (storedPriceSource, bool, *appstate.PriceState, error) {
+	r.setArgs.instrumentID = instrumentID
+	r.setArgs.provider = provider
+	r.setArgs.providerSymbol = providerSymbol
+	r.setArgs.enabled = enabled
+
+	return r.setStored, r.setChanged, r.setState, r.setErr
 }
 
 func (r *fakePriceRepository) ApplyFundUnitMOEXDailyPrices(
@@ -487,8 +540,8 @@ func TestDiscoverYahooSourcesCreatesMappingsForCurrentYahooEligibleInstruments(t
 	}
 
 	repository := &fakePriceRepository{
-		yahooMappedIDs:   map[int64]struct{}{existingID: {}},
-		yahooCreateCount: 2,
+		mappedIDs:   map[int64]struct{}{existingID: {}},
+		createCount: 2,
 	}
 	source := &fakeYahooSource{
 		resolveResult: YahooSymbolResolutionResult{
@@ -519,14 +572,14 @@ func TestDiscoverYahooSourcesCreatesMappingsForCurrentYahooEligibleInstruments(t
 		t.Fatalf("resolved ISINs = %#v", source.resolveISINs)
 	}
 
-	if len(repository.yahooCreatedMappings) != 2 {
-		t.Fatalf("created mappings = %#v", repository.yahooCreatedMappings)
+	if len(repository.createdMappings) != 2 {
+		t.Fatalf("created mappings = %#v", repository.createdMappings)
 	}
-	if repository.yahooCreatedMappings[0].InstrumentID != equityID ||
-		repository.yahooCreatedMappings[0].ProviderSymbol != "FRHC" ||
-		repository.yahooCreatedMappings[1].InstrumentID != depositaryReceiptID ||
-		repository.yahooCreatedMappings[1].ProviderSymbol != "DR.TEST" {
-		t.Fatalf("created mappings = %#v", repository.yahooCreatedMappings)
+	if repository.createdMappings[0].InstrumentID != equityID ||
+		repository.createdMappings[0].ProviderSymbol != "FRHC" ||
+		repository.createdMappings[1].InstrumentID != depositaryReceiptID ||
+		repository.createdMappings[1].ProviderSymbol != "DR.TEST" {
+		t.Fatalf("created mappings = %#v", repository.createdMappings)
 	}
 }
 
@@ -567,8 +620,8 @@ func TestDiscoverYahooSourcesKeepsMissingISINUnmapped(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 
-	if len(repository.yahooCreatedMappings) != 0 {
-		t.Fatalf("created mappings = %#v", repository.yahooCreatedMappings)
+	if len(repository.createdMappings) != 0 {
+		t.Fatalf("created mappings = %#v", repository.createdMappings)
 	}
 }
 
@@ -605,11 +658,11 @@ func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
 	pricedAt := time.Date(2026, time.August, 16, 15, 10, 0, 0, time.UTC)
 	fetchedAt := time.Date(2026, time.August, 16, 15, 10, 5, 0, time.UTC)
 	repository := &fakePriceRepository{
-		yahooSources: []yahooPriceSource{
+		priceSources: []priceSource{
 			{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: " dre2.f "},
 			{PriceSourceID: 11, InstrumentID: 99, ProviderSymbol: "OLD"},
 		},
-		yahooResult: yahooApplyResult{ChangedPrices: []appstate.InstrumentPrice{
+		applyResult: applyQuotesResult{ChangedPrices: []appstate.InstrumentPrice{
 			{
 				PriceSourceID:  10,
 				InstrumentID:   42,
@@ -650,10 +703,10 @@ func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
 	if result.ExpectedSources != 1 || !result.Changed() || len(result.ChangedPrices) != 1 {
 		t.Fatalf("result = %#v", result)
 	}
-	if len(repository.yahooApplied) != 1 {
-		t.Fatalf("applied Yahoo quotes = %#v", repository.yahooApplied)
+	if len(repository.appliedQuotes) != 1 {
+		t.Fatalf("applied Yahoo quotes = %#v", repository.appliedQuotes)
 	}
-	applied := repository.yahooApplied[0]
+	applied := repository.appliedQuotes[0]
 	if applied.PriceSourceID != 10 || applied.InstrumentID != 42 || applied.Quote.UnitValue != "126.32" || applied.Quote.Currency != "GBP" || !applied.Quote.PricedAt.Equal(pricedAt) {
 		t.Fatalf("applied Yahoo quote = %#v", applied)
 	}
@@ -694,7 +747,7 @@ func TestSyncYahooPricesSkipsMissingAndInvalidQuotes(t *testing.T) {
 		t.Fatalf("Initialize() error = %v", err)
 	}
 
-	repository := &fakePriceRepository{yahooSources: []yahooPriceSource{
+	repository := &fakePriceRepository{priceSources: []priceSource{
 		{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"},
 		{PriceSourceID: 11, InstrumentID: 43, ProviderSymbol: "BBB"},
 	}}
@@ -717,8 +770,8 @@ func TestSyncYahooPricesSkipsMissingAndInvalidQuotes(t *testing.T) {
 	if result.InvalidSources != 1 || result.MissingSources != 1 || len(result.InvalidQuotes) != 1 || len(result.MissingSymbols) != 1 {
 		t.Fatalf("result = %#v", result)
 	}
-	if repository.yahooApplied != nil {
-		t.Fatalf("repository received skipped quotes: %#v", repository.yahooApplied)
+	if repository.appliedQuotes != nil {
+		t.Fatalf("repository received skipped quotes: %#v", repository.appliedQuotes)
 	}
 	if manager.Load() != initial {
 		t.Fatal("skipped Yahoo quotes replaced application state")
@@ -738,7 +791,7 @@ func TestSyncYahooPricesRechecksCompositionAfterFetch(t *testing.T) {
 		t.Fatalf("Initialize() error = %v", err)
 	}
 
-	repository := &fakePriceRepository{yahooSources: []yahooPriceSource{
+	repository := &fakePriceRepository{priceSources: []priceSource{
 		{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"},
 	}}
 	pricedAt := time.Date(2026, time.August, 16, 15, 20, 0, 0, time.UTC)
@@ -768,8 +821,8 @@ func TestSyncYahooPricesRechecksCompositionAfterFetch(t *testing.T) {
 	if result.CompositionSkippedSources != 1 || result.Changed() {
 		t.Fatalf("result = %#v", result)
 	}
-	if repository.yahooApplied != nil {
-		t.Fatalf("repository received stale composition quote: %#v", repository.yahooApplied)
+	if repository.appliedQuotes != nil {
+		t.Fatalf("repository received stale composition quote: %#v", repository.appliedQuotes)
 	}
 	if len(manager.Load().Fund.Snapshot.Assets) != 0 {
 		t.Fatalf("current fund state was reverted: %#v", manager.Load().Fund.Snapshot.Assets)
@@ -792,8 +845,8 @@ func TestSyncYahooPricesKeepsRAMOnRepositoryError(t *testing.T) {
 	}
 
 	repository := &fakePriceRepository{
-		yahooSources:  []yahooPriceSource{{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"}},
-		yahooApplyErr: errors.New("write failed"),
+		priceSources:   []priceSource{{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "AAA"}},
+		quotesApplyErr: errors.New("write failed"),
 	}
 	source := &fakeYahooSource{result: YahooSourceResult{
 		RequestedSymbols: 1,
@@ -814,5 +867,174 @@ func TestSyncYahooPricesKeepsRAMOnRepositoryError(t *testing.T) {
 	}
 	if manager.Load() != initial {
 		t.Fatal("RAM state changed after Yahoo repository error")
+	}
+}
+
+func TestDiscoverMOEXSourcesCreatesMappingBeforeYahoo(t *testing.T) {
+	t.Parallel()
+
+	instrumentID := int64(51)
+	manager := appstate.NewManager()
+	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{
+		Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{
+			{InstrumentID: &instrumentID, InstrumentType: "equity", ISIN: "RU000A0JQ9P9"},
+		}},
+	}}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	repository := &fakePriceRepository{createCount: 1}
+	source := &fakeSource{resolveResult: MOEXSymbolResolutionResult{
+		RequestedISINs: 1,
+		SymbolsByISIN:  map[string]string{"RU000A0JQ9P9": "SPBE"},
+	}}
+	service := NewService(repository, source, nil, manager)
+
+	result, err := service.DiscoverMOEXSources(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverMOEXSources() error = %v", err)
+	}
+	if result.CreatedSources != 1 || result.ResolvedISINs != 1 || result.RequestedISINs != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(source.resolveISINs) != 1 || source.resolveISINs[0] != "RU000A0JQ9P9" {
+		t.Fatalf("resolved ISINs = %#v", source.resolveISINs)
+	}
+	if len(repository.createdMappings) != 1 || repository.createdMappings[0].ProviderSymbol != "SPBE" {
+		t.Fatalf("created mappings = %#v", repository.createdMappings)
+	}
+}
+
+func TestDiscoverYahooSourcesSkipsInstrumentMappedToAnotherProvider(t *testing.T) {
+	t.Parallel()
+
+	instrumentID := int64(51)
+	manager := appstate.NewManager()
+	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{
+		Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{
+			{InstrumentID: &instrumentID, InstrumentType: "equity", ISIN: "RU000A0JQ9P9"},
+		}},
+	}}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	repository := &fakePriceRepository{mappedIDs: map[int64]struct{}{instrumentID: {}}}
+	source := &fakeYahooSource{}
+	service := NewService(repository, nil, source, manager)
+
+	result, err := service.DiscoverYahooSources(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverYahooSources() error = %v", err)
+	}
+	if result.CandidateInstruments != 1 || result.ExistingSources != 1 || result.RequestedISINs != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	if source.resolveISINs != nil {
+		t.Fatalf("Yahoo ResolveSymbols() called with %#v", source.resolveISINs)
+	}
+}
+
+func TestSyncMOEXSecurityPricesUpdatesCurrentCompositionSource(t *testing.T) {
+	t.Parallel()
+
+	instrumentID := int64(51)
+	manager := appstate.NewManager()
+	initialPrices := &appstate.PriceState{
+		Sources:     map[int64]appstate.InstrumentPrice{},
+		DailyPrices: map[int64]appstate.InstrumentDailyPriceSeries{},
+		Points:      map[int64]appstate.InstrumentPricePointSeries{},
+	}
+	if err := manager.Initialize(&appstate.State{
+		Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{
+			{InstrumentID: &instrumentID},
+		}}},
+		Prices: initialPrices,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	pricedAt := time.Date(2026, time.August, 16, 18, 42, 31, 0, time.UTC)
+	fetchedAt := time.Date(2026, time.August, 16, 18, 42, 35, 0, time.UTC)
+	repository := &fakePriceRepository{
+		priceSources: []priceSource{{PriceSourceID: 15, InstrumentID: instrumentID, ProviderSymbol: "SPBE"}},
+		applyResult: applyQuotesResult{ChangedPrices: []appstate.InstrumentPrice{{
+			PriceSourceID:  15,
+			InstrumentID:   instrumentID,
+			AssetType:      "equity",
+			ISIN:           "RU000A0JQ9P9",
+			Name:           "СПБ Биржа",
+			Provider:       ProviderMOEX,
+			ProviderSymbol: "SPBE",
+			UnitValue:      "85.75",
+			Currency:       "RUB",
+			PricedAt:       pricedAt,
+			FetchedAt:      fetchedAt,
+		}}},
+	}
+	source := &fakeSource{securityResult: MOEXSourceResult{
+		RequestedSymbols: 1,
+		QuotesBySymbol: map[string]SourceQuote{
+			"SPBE": {UnitValue: "85.75", Currency: "RUB", PricedAt: pricedAt, Source: "last"},
+		},
+	}}
+	service := NewService(repository, source, nil, manager)
+	service.now = func() time.Time { return fetchedAt }
+
+	result, err := service.SyncMOEXSecurityPrices(context.Background())
+	if err != nil {
+		t.Fatalf("SyncMOEXSecurityPrices() error = %v", err)
+	}
+	if !result.Changed() || len(result.ChangedPrices) != 1 || result.ExpectedSources != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(source.securitySymbols) != 1 || source.securitySymbols[0] != "SPBE" {
+		t.Fatalf("security symbols = %#v", source.securitySymbols)
+	}
+	if len(repository.appliedQuotes) != 1 || repository.appliedQuotes[0].Quote.Currency != "RUB" {
+		t.Fatalf("applied quotes = %#v", repository.appliedQuotes)
+	}
+	if manager.Load().Prices.Sources[15].UnitValue != "85.75" {
+		t.Fatalf("current price = %#v", manager.Load().Prices.Sources[15])
+	}
+}
+
+func TestSetPriceSourcePublishesPriceStateOnlyAfterRepositorySuccess(t *testing.T) {
+	t.Parallel()
+
+	instrumentID := int64(51)
+	manager := appstate.NewManager()
+	initialPrices := &appstate.PriceState{Sources: map[int64]appstate.InstrumentPrice{}}
+	if err := manager.Initialize(&appstate.State{
+		Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{Assets: []appstate.FundAsset{
+			{InstrumentID: &instrumentID},
+		}}},
+		Prices: initialPrices,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	nextPrices := &appstate.PriceState{Sources: map[int64]appstate.InstrumentPrice{}}
+	repository := &fakePriceRepository{
+		setStored: storedPriceSource{
+			ID:             15,
+			InstrumentID:   instrumentID,
+			Provider:       ProviderMOEX,
+			ProviderSymbol: "SPBE",
+			Enabled:        true,
+		},
+		setChanged: true,
+		setState:   nextPrices,
+	}
+	service := NewService(repository, nil, nil, manager)
+
+	result, err := service.SetPriceSource(context.Background(), instrumentID, ProviderMOEX, "SPBE", true)
+	if err != nil {
+		t.Fatalf("SetPriceSource() error = %v", err)
+	}
+	if !result.Changed || result.Source.Provider != ProviderMOEX || result.Source.ProviderSymbol != "SPBE" {
+		t.Fatalf("result = %#v", result)
+	}
+	if manager.Load().Prices != nextPrices {
+		t.Fatal("price state was not published")
 	}
 }

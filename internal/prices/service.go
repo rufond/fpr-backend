@@ -16,16 +16,18 @@ var fundUnitHistoryStartDate = time.Date(2020, time.February, 5, 0, 0, 0, 0, tim
 type serviceRepository interface {
 	EnsureFundUnitMOEXSource(ctx context.Context) (int64, error)
 	LoadState(ctx context.Context) (*appstate.PriceState, error)
-	YahooPriceSources(ctx context.Context) ([]yahooPriceSource, error)
-	YahooMappedInstrumentIDs(ctx context.Context) (map[int64]struct{}, error)
-	CreateYahooPriceSources(ctx context.Context, items []yahooSourceMapping) (int, error)
+	PriceSources(ctx context.Context, provider string) ([]priceSource, error)
+	MappedInstrumentIDs(ctx context.Context) (map[int64]struct{}, error)
+	CreatePriceSources(ctx context.Context, provider string, items []sourceMapping) (int, error)
+	AllPriceSources(ctx context.Context) ([]storedPriceSource, error)
+	SetPriceSource(ctx context.Context, instrumentID int64, provider string, providerSymbol string, enabled bool) (storedPriceSource, bool, *appstate.PriceState, error)
 	ApplyFundUnitMOEXQuote(
 		ctx context.Context,
 		priceSourceID int64,
 		quote SourceQuote,
 		fetchedAt time.Time,
 	) (changed bool, stale bool, price appstate.InstrumentPrice, err error)
-	ApplyYahooQuotes(ctx context.Context, items []yahooQuoteToApply, fetchedAt time.Time) (yahooApplyResult, error)
+	ApplyQuotes(ctx context.Context, provider string, items []quoteToApply, fetchedAt time.Time) (applyQuotesResult, error)
 	ApplyFundUnitMOEXDailyPrices(
 		ctx context.Context,
 		priceSourceID int64,
@@ -40,6 +42,11 @@ type Service struct {
 	state                *appstate.Manager
 	now                  func() time.Time
 	fundUnitMOEXSourceID int64
+}
+
+type sourceDiscoveryCandidate struct {
+	InstrumentID int64
+	ISIN         string
 }
 
 func NewService(repository serviceRepository, source Source, yahooSource YahooSource, state *appstate.Manager) *Service {
@@ -126,50 +133,75 @@ func (s *Service) SyncFundUnitMOEX(ctx context.Context) (*SyncResult, error) {
 	return result, nil
 }
 
-func (s *Service) DiscoverYahooSources(ctx context.Context) (*YahooSourceDiscoveryResult, error) {
+func (s *Service) DiscoverMOEXSources(ctx context.Context) (*MOEXSourceDiscoveryResult, error) {
 	current := s.state.Load()
 
-	mappedInstrumentIDs, errMapped := s.repository.YahooMappedInstrumentIDs(ctx)
+	mappedInstrumentIDs, errMapped := s.repository.MappedInstrumentIDs(ctx)
 	if errMapped != nil {
 		return nil, errMapped
 	}
 
-	type candidate struct {
-		instrumentID int64
-		isin         string
+	candidates, candidateInstruments, existingSources := currentUnmappedSecurityCandidates(current, mappedInstrumentIDs)
+	result := &MOEXSourceDiscoveryResult{
+		CandidateInstruments: candidateInstruments,
+		ExistingSources:      existingSources,
+	}
+	if len(candidates) == 0 {
+		return result, nil
 	}
 
-	result := &YahooSourceDiscoveryResult{}
-	candidates := make([]candidate, 0)
-	seenInstrumentIDs := make(map[int64]struct{})
+	isins := make([]string, 0, len(candidates))
+	for _, item := range candidates {
+		isins = append(isins, item.ISIN)
+	}
 
-	for _, asset := range current.Fund.Snapshot.Assets {
-		if asset.InstrumentID == nil {
+	resolved, errResolve := s.source.ResolveSecuritySymbols(ctx, isins)
+	if errResolve != nil {
+		return nil, fmt.Errorf("resolve MOEX symbols: %w", errResolve)
+	}
+
+	result.RequestedISINs = resolved.RequestedISINs
+	result.ResolvedISINs = len(resolved.SymbolsByISIN)
+	result.MissingISINs = slices.Clone(resolved.MissingISINs)
+
+	mappings := make([]sourceMapping, 0, len(resolved.SymbolsByISIN))
+	for _, item := range candidates {
+		symbol, exists := resolved.SymbolsByISIN[item.ISIN]
+		if !exists {
 			continue
 		}
 
-		switch asset.InstrumentType {
-		case "equity", "depositary_receipt":
-		default:
-			continue
-		}
-
-		instrumentID := *asset.InstrumentID
-		if _, seen := seenInstrumentIDs[instrumentID]; seen {
-			continue
-		}
-		seenInstrumentIDs[instrumentID] = struct{}{}
-		result.CandidateInstruments++
-
-		if _, mapped := mappedInstrumentIDs[instrumentID]; mapped {
-			result.ExistingSources++
-			continue
-		}
-
-		candidates = append(candidates, candidate{
-			instrumentID: instrumentID,
-			isin:         asset.ISIN,
+		mappings = append(mappings, sourceMapping{
+			InstrumentID:   item.InstrumentID,
+			ProviderSymbol: symbol,
 		})
+	}
+
+	if len(mappings) == 0 {
+		return result, nil
+	}
+
+	created, errCreate := s.repository.CreatePriceSources(ctx, ProviderMOEX, mappings)
+	if errCreate != nil {
+		return nil, errCreate
+	}
+	result.CreatedSources = created
+
+	return result, nil
+}
+
+func (s *Service) DiscoverYahooSources(ctx context.Context) (*YahooSourceDiscoveryResult, error) {
+	current := s.state.Load()
+
+	mappedInstrumentIDs, errMapped := s.repository.MappedInstrumentIDs(ctx)
+	if errMapped != nil {
+		return nil, errMapped
+	}
+
+	candidates, candidateInstruments, existingSources := currentUnmappedSecurityCandidates(current, mappedInstrumentIDs)
+	result := &YahooSourceDiscoveryResult{
+		CandidateInstruments: candidateInstruments,
+		ExistingSources:      existingSources,
 	}
 
 	if len(candidates) == 0 {
@@ -178,7 +210,7 @@ func (s *Service) DiscoverYahooSources(ctx context.Context) (*YahooSourceDiscove
 
 	isins := make([]string, 0, len(candidates))
 	for _, item := range candidates {
-		isins = append(isins, item.isin)
+		isins = append(isins, item.ISIN)
 	}
 
 	resolved, errResolve := s.yahoo.ResolveSymbols(ctx, isins)
@@ -190,15 +222,15 @@ func (s *Service) DiscoverYahooSources(ctx context.Context) (*YahooSourceDiscove
 	result.ResolvedISINs = len(resolved.SymbolsByISIN)
 	result.MissingISINs = slices.Clone(resolved.MissingISINs)
 
-	mappings := make([]yahooSourceMapping, 0, len(resolved.SymbolsByISIN))
+	mappings := make([]sourceMapping, 0, len(resolved.SymbolsByISIN))
 	for _, item := range candidates {
-		symbol, exists := resolved.SymbolsByISIN[item.isin]
+		symbol, exists := resolved.SymbolsByISIN[item.ISIN]
 		if !exists {
 			continue
 		}
 
-		mappings = append(mappings, yahooSourceMapping{
-			InstrumentID:   item.instrumentID,
+		mappings = append(mappings, sourceMapping{
+			InstrumentID:   item.InstrumentID,
 			ProviderSymbol: symbol,
 		})
 	}
@@ -207,7 +239,7 @@ func (s *Service) DiscoverYahooSources(ctx context.Context) (*YahooSourceDiscove
 		return result, nil
 	}
 
-	created, errCreate := s.repository.CreateYahooPriceSources(ctx, mappings)
+	created, errCreate := s.repository.CreatePriceSources(ctx, ProviderYahoo, mappings)
 	if errCreate != nil {
 		return nil, errCreate
 	}
@@ -216,16 +248,109 @@ func (s *Service) DiscoverYahooSources(ctx context.Context) (*YahooSourceDiscove
 	return result, nil
 }
 
-func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error) {
+func (s *Service) SyncMOEXSecurityPrices(ctx context.Context) (*MOEXSecuritySyncResult, error) {
 	current := s.state.Load()
 
-	priceSources, errSources := s.repository.YahooPriceSources(ctx)
+	priceSources, errSources := s.repository.PriceSources(ctx, ProviderMOEX)
 	if errSources != nil {
 		return nil, errSources
 	}
 
 	currentInstrumentIDs := currentFundInstrumentIDs(current)
-	activeSources := make([]yahooPriceSource, 0, len(priceSources))
+	activeSources := make([]priceSource, 0, len(priceSources))
+	symbols := make([]string, 0, len(priceSources))
+
+	for _, source := range priceSources {
+		if _, currentInstrument := currentInstrumentIDs[source.InstrumentID]; !currentInstrument {
+			continue
+		}
+
+		activeSources = append(activeSources, source)
+		symbols = append(symbols, source.ProviderSymbol)
+	}
+
+	result := &MOEXSecuritySyncResult{ExpectedSources: len(activeSources)}
+	if len(activeSources) == 0 {
+		return result, nil
+	}
+
+	fetchResult, errFetch := s.source.FetchSecurityPrices(ctx, symbols)
+	if errFetch != nil {
+		return nil, fmt.Errorf("fetch MOEX security prices: %w", errFetch)
+	}
+
+	result.RequestedSymbols = fetchResult.RequestedSymbols
+	result.FailedSources = len(fetchResult.Issues)
+	result.Issues = slices.Clone(fetchResult.Issues)
+
+	items := make([]quoteToApply, 0, len(activeSources))
+	for _, source := range activeSources {
+		quote, exists := fetchResult.QuotesBySymbol[source.ProviderSymbol]
+		if !exists {
+			continue
+		}
+
+		items = append(items, quoteToApply{
+			PriceSourceID: source.PriceSourceID,
+			InstrumentID:  source.InstrumentID,
+			Quote:         quote,
+		})
+	}
+
+	if len(items) == 0 {
+		return result, nil
+	}
+
+	fetchedAt := s.now().UTC()
+	errUpdate := s.state.Update(func(currentState *appstate.State) (*appstate.State, error) {
+		activeInstrumentIDs := currentFundInstrumentIDs(currentState)
+		activeItems := make([]quoteToApply, 0, len(items))
+		for _, item := range items {
+			if _, active := activeInstrumentIDs[item.InstrumentID]; active {
+				activeItems = append(activeItems, item)
+			} else {
+				result.CompositionSkippedSources++
+			}
+		}
+		if len(activeItems) == 0 {
+			return currentState, nil
+		}
+
+		applied, errApply := s.repository.ApplyQuotes(ctx, ProviderMOEX, activeItems, fetchedAt)
+		if errApply != nil {
+			return nil, errApply
+		}
+
+		result.ChangedPrices = applied.ChangedPrices
+		result.UnchangedSources = applied.Unchanged
+		result.StaleSources = applied.Stale
+
+		if len(applied.ChangedPrices) == 0 {
+			return currentState, nil
+		}
+
+		next := new(*currentState)
+		next.Prices = priceStateWithCurrentUpdates(currentState.Prices, applied.ChangedPrices, fetchedAt)
+
+		return next, nil
+	})
+	if errUpdate != nil {
+		return nil, errUpdate
+	}
+
+	return result, nil
+}
+
+func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error) {
+	current := s.state.Load()
+
+	priceSources, errSources := s.repository.PriceSources(ctx, ProviderYahoo)
+	if errSources != nil {
+		return nil, errSources
+	}
+
+	currentInstrumentIDs := currentFundInstrumentIDs(current)
+	activeSources := make([]priceSource, 0, len(priceSources))
 	symbols := make([]string, 0, len(priceSources))
 
 	for _, source := range priceSources {
@@ -257,14 +382,14 @@ func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error)
 	result.DuplicateSymbols = slices.Clone(fetchResult.Duplicates)
 	result.InvalidQuotes = slices.Clone(fetchResult.Invalid)
 
-	items := make([]yahooQuoteToApply, 0, len(activeSources))
+	items := make([]quoteToApply, 0, len(activeSources))
 	for _, source := range activeSources {
 		quote, exists := fetchResult.QuotesByRequest[source.ProviderSymbol]
 		if !exists {
 			continue
 		}
 
-		items = append(items, yahooQuoteToApply{
+		items = append(items, quoteToApply{
 			PriceSourceID: source.PriceSourceID,
 			InstrumentID:  source.InstrumentID,
 			Quote: SourceQuote{
@@ -283,7 +408,7 @@ func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error)
 	fetchedAt := s.now().UTC()
 	errUpdate := s.state.Update(func(currentState *appstate.State) (*appstate.State, error) {
 		activeInstrumentIDs := currentFundInstrumentIDs(currentState)
-		activeItems := make([]yahooQuoteToApply, 0, len(items))
+		activeItems := make([]quoteToApply, 0, len(items))
 		for _, item := range items {
 			if _, active := activeInstrumentIDs[item.InstrumentID]; active {
 				activeItems = append(activeItems, item)
@@ -295,7 +420,7 @@ func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error)
 			return currentState, nil
 		}
 
-		applied, errApply := s.repository.ApplyYahooQuotes(ctx, activeItems, fetchedAt)
+		applied, errApply := s.repository.ApplyQuotes(ctx, ProviderYahoo, activeItems, fetchedAt)
 		if errApply != nil {
 			return nil, errApply
 		}
@@ -362,6 +487,139 @@ func (s *Service) SyncFundUnitMOEXHistory(ctx context.Context) (*DailySyncResult
 	}
 
 	return result, nil
+}
+
+func (s *Service) AdminPriceSources(ctx context.Context) (*AdminPriceSourcesResult, error) {
+	current := s.state.Load()
+
+	stored, errSources := s.repository.AllPriceSources(ctx)
+	if errSources != nil {
+		return nil, errSources
+	}
+
+	byInstrument := make(map[int64][]AdminPriceSource)
+	for _, source := range stored {
+		byInstrument[source.InstrumentID] = append(byInstrument[source.InstrumentID], AdminPriceSource{
+			ID:             source.ID,
+			Provider:       source.Provider,
+			ProviderSymbol: source.ProviderSymbol,
+			Enabled:        source.Enabled,
+		})
+	}
+
+	result := &AdminPriceSourcesResult{Items: make([]AdminPriceSourceInstrument, 0)}
+	seen := make(map[int64]struct{})
+	for _, asset := range current.Fund.Snapshot.Assets {
+		if asset.InstrumentID == nil {
+			continue
+		}
+
+		instrumentID := *asset.InstrumentID
+		if _, exists := seen[instrumentID]; exists {
+			continue
+		}
+		seen[instrumentID] = struct{}{}
+
+		sources := slices.Clone(byInstrument[instrumentID])
+		if sources == nil {
+			sources = []AdminPriceSource{}
+		}
+
+		result.Items = append(result.Items, AdminPriceSourceInstrument{
+			InstrumentID: instrumentID,
+			AssetType:    asset.InstrumentType,
+			ISIN:         asset.ISIN,
+			Name:         asset.InstrumentName,
+			Ticker:       asset.Ticker,
+			Sources:      sources,
+		})
+	}
+
+	return result, nil
+}
+
+func (s *Service) SetPriceSource(
+	ctx context.Context,
+	instrumentID int64,
+	provider string,
+	providerSymbol string,
+	enabled bool,
+) (*SetPriceSourceResult, error) {
+	var result *SetPriceSourceResult
+
+	errUpdate := s.state.Update(func(current *appstate.State) (*appstate.State, error) {
+		if _, exists := currentFundInstrumentIDs(current)[instrumentID]; !exists {
+			return nil, ErrPriceSourceInstrumentNotFound
+		}
+
+		stored, changed, priceState, errSet := s.repository.SetPriceSource(ctx, instrumentID, provider, providerSymbol, enabled)
+		if errSet != nil {
+			return nil, errSet
+		}
+
+		result = &SetPriceSourceResult{
+			Changed:      changed,
+			InstrumentID: instrumentID,
+			Source: AdminPriceSource{
+				ID:             stored.ID,
+				Provider:       stored.Provider,
+				ProviderSymbol: stored.ProviderSymbol,
+				Enabled:        stored.Enabled,
+			},
+		}
+
+		if !changed {
+			return current, nil
+		}
+
+		next := new(*current)
+		next.Prices = priceState
+
+		return next, nil
+	})
+	if errUpdate != nil {
+		return nil, errUpdate
+	}
+
+	return result, nil
+}
+
+func currentUnmappedSecurityCandidates(state *appstate.State, mappedInstrumentIDs map[int64]struct{}) ([]sourceDiscoveryCandidate, int, int) {
+	candidates := make([]sourceDiscoveryCandidate, 0)
+	seenInstrumentIDs := make(map[int64]struct{})
+	candidateInstruments := 0
+	existingSources := 0
+
+	for _, asset := range state.Fund.Snapshot.Assets {
+		if asset.InstrumentID == nil {
+			continue
+		}
+
+		switch asset.InstrumentType {
+		case "equity", "depositary_receipt":
+		default:
+			continue
+		}
+
+		instrumentID := *asset.InstrumentID
+		if _, seen := seenInstrumentIDs[instrumentID]; seen {
+			continue
+		}
+		seenInstrumentIDs[instrumentID] = struct{}{}
+		candidateInstruments++
+
+		if _, mapped := mappedInstrumentIDs[instrumentID]; mapped {
+			existingSources++
+			continue
+		}
+
+		candidates = append(candidates, sourceDiscoveryCandidate{
+			InstrumentID: instrumentID,
+			ISIN:         asset.ISIN,
+		})
+	}
+
+	return candidates, candidateInstruments, existingSources
 }
 
 func currentFundInstrumentIDs(state *appstate.State) map[int64]struct{} {

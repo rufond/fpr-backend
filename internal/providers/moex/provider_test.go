@@ -355,3 +355,87 @@ func TestFetchRateUSDRUBUsesCETS(t *testing.T) {
 		t.Fatalf("PricedAt = %s, want %s", rate.PricedAt, want)
 	}
 }
+
+func TestResolveSecuritySymbolsUsesExactTradedShareISIN(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/iss/securities.json" {
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+		if request.URL.Query().Get("securities.columns") != "secid,isin,is_trading,group" {
+			t.Fatalf("securities.columns = %q", request.URL.Query().Get("securities.columns"))
+		}
+
+		switch request.URL.Query().Get("q") {
+		case "RU000A0JQ9P9":
+			_, _ = writer.Write([]byte(`{
+				"securities":{"columns":["secid","isin","is_trading","group"],"data":[
+					["SPBE","RU000A0JQ9P9",1,"stock_shares"],
+					["NOISE","RU000A000000",1,"stock_shares"]
+				]}
+			}`))
+		case "KZ1C00001122":
+			_, _ = writer.Write([]byte(`{
+				"securities":{"columns":["secid","isin","is_trading","group"],"data":[
+					["KMGZ","KZ1C00001122",0,"stock_shares"]
+				]}
+			}`))
+		case "US00449L1026":
+			_, _ = writer.Write([]byte(`{"securities":{"columns":["secid","isin","is_trading","group"],"data":[]}}`))
+		default:
+			t.Fatalf("unexpected q = %q", request.URL.Query().Get("q"))
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	result, err := provider.ResolveSecuritySymbols(context.Background(), []string{
+		"RU000A0JQ9P9",
+		"KZ1C00001122",
+		"US00449L1026",
+	})
+	if err != nil {
+		t.Fatalf("ResolveSecuritySymbols() error = %v", err)
+	}
+
+	if result.RequestedISINs != 3 || len(result.SymbolsByISIN) != 1 || result.SymbolsByISIN["RU000A0JQ9P9"] != "SPBE" {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(result.MissingISINs) != 2 || result.MissingISINs[0] != "KZ1C00001122" || result.MissingISINs[1] != "US00449L1026" {
+		t.Fatalf("missing ISINs = %#v", result.MissingISINs)
+	}
+}
+
+func TestFetchSecurityPricesUsesDynamicBoard(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/iss/securities/SPBE.json":
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["TQBR","stock","shares",1,1,"RUB"]]}}`))
+		case "/iss/engines/stock/markets/shares/boards/TQBR/securities/SPBE/securities.json":
+			_, _ = writer.Write([]byte(`{
+				"marketdata":{"columns":["LAST","TRADEDATE","TIME"],"data":[[85.75,"2026-08-14","18:42:31"]]},
+				"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[84.5,"2026-08-13"]]}
+			}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	result, err := provider.FetchSecurityPrices(context.Background(), []string{"SPBE"})
+	if err != nil {
+		t.Fatalf("FetchSecurityPrices() error = %v", err)
+	}
+
+	quote, exists := result.QuotesBySymbol["SPBE"]
+	if !exists || quote.UnitValue != "85.75" || quote.Currency != "RUB" || quote.Source != "last" {
+		t.Fatalf("quote = %#v", quote)
+	}
+	if len(result.Issues) != 0 {
+		t.Fatalf("issues = %#v", result.Issues)
+	}
+}

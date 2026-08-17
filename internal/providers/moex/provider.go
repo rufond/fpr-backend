@@ -93,6 +93,10 @@ type issSecurityResponse struct {
 	Boards issBlock `json:"boards"`
 }
 
+type issSecuritiesResponse struct {
+	Securities issBlock `json:"securities"`
+}
+
 type issQuoteResponse struct {
 	MarketData issBlock `json:"marketdata"`
 	Securities issBlock `json:"securities"`
@@ -149,6 +153,104 @@ func (p *Provider) FetchUSDRUB(ctx context.Context) (fx.SourceRate, error) {
 		PricedAt:      quote.PricedAt,
 		Source:        quote.Source,
 	}, nil
+}
+
+func (p *Provider) ResolveSecuritySymbols(ctx context.Context, isins []string) (prices.MOEXSymbolResolutionResult, error) {
+	result := prices.MOEXSymbolResolutionResult{
+		RequestedISINs: len(isins),
+		SymbolsByISIN:  make(map[string]string, len(isins)),
+	}
+
+	for _, isin := range isins {
+		requestURL, errURL := url.Parse(p.baseURL + "/iss/securities.json")
+		if errURL != nil {
+			return prices.MOEXSymbolResolutionResult{}, fmt.Errorf("build MOEX security search URL for %s: %w", isin, errURL)
+		}
+
+		query := requestURL.Query()
+		query.Set("q", isin)
+		query.Set("iss.meta", "off")
+		query.Set("iss.only", "securities")
+		query.Set("securities.columns", "secid,isin,is_trading,group")
+		requestURL.RawQuery = query.Encode()
+
+		var payload issSecuritiesResponse
+		if err := p.fetchJSON(ctx, requestURL, &payload); err != nil {
+			return prices.MOEXSymbolResolutionResult{}, fmt.Errorf("search MOEX security by ISIN %s: %w", isin, err)
+		}
+
+		symbols := make(map[string]struct{})
+		for _, data := range payload.Securities.Data {
+			row, ok := rowMap(payload.Securities.Columns, data)
+			if !ok {
+				continue
+			}
+
+			returnedISIN, okISIN := stringValue(row["isin"])
+			if !okISIN || returnedISIN != isin {
+				continue
+			}
+
+			isTrading, okTrading := boolFlag(row["is_trading"])
+			group, okGroup := stringValue(row["group"])
+			if !okTrading || !isTrading || !okGroup || group != "stock_shares" {
+				continue
+			}
+
+			symbol, okSymbol := stringValue(row["secid"])
+			if okSymbol {
+				symbols[symbol] = struct{}{}
+			}
+		}
+
+		switch len(symbols) {
+		case 0:
+			result.MissingISINs = append(result.MissingISINs, isin)
+		case 1:
+			for symbol := range symbols {
+				result.SymbolsByISIN[isin] = symbol
+			}
+		default:
+			return prices.MOEXSymbolResolutionResult{}, fmt.Errorf("MOEX returned multiple traded share symbols for ISIN %s", isin)
+		}
+	}
+
+	return result, nil
+}
+
+func (p *Provider) FetchSecurityPrices(ctx context.Context, symbols []string) (prices.MOEXSourceResult, error) {
+	result := prices.MOEXSourceResult{
+		RequestedSymbols: len(symbols),
+		QuotesBySymbol:   make(map[string]prices.SourceQuote, len(symbols)),
+	}
+
+	for _, symbol := range symbols {
+		quote, errQuote := p.fetchQuoteWithBoardRefresh(ctx, marketSecurity{
+			Engine:     "stock",
+			Market:     "shares",
+			SecurityID: symbol,
+		})
+		if errQuote != nil {
+			if ctx.Err() != nil {
+				return prices.MOEXSourceResult{}, ctx.Err()
+			}
+
+			result.Issues = append(result.Issues, prices.MOEXQuoteIssue{
+				Symbol: symbol,
+				Error:  errQuote.Error(),
+			})
+			continue
+		}
+
+		result.QuotesBySymbol[symbol] = prices.SourceQuote{
+			UnitValue: quote.Value,
+			Currency:  quote.Currency,
+			PricedAt:  quote.PricedAt,
+			Source:    quote.Source,
+		}
+	}
+
+	return result, nil
 }
 
 func (p *Provider) FetchFundUnitDailyPrices(ctx context.Context, from time.Time) ([]prices.SourceDailyPrice, error) {
@@ -612,6 +714,7 @@ func positiveDecimal(value any) (string, bool) {
 func stringValue(value any) (string, bool) {
 	text, ok := value.(string)
 	text = strings.TrimSpace(text)
+
 	return text, ok && text != ""
 }
 
@@ -620,8 +723,10 @@ func normalizeCurrency(value string) (string, bool) {
 	if code == "SUR" {
 		code = "RUB"
 	}
+
 	if !currency.ValidCode(code) {
 		return "", false
 	}
+
 	return code, true
 }

@@ -115,7 +115,7 @@ func (r *Repository) LoadState(ctx context.Context) (*appstate.PriceState, error
 	return loadPriceState(ctx, r.db)
 }
 
-func (r *Repository) YahooPriceSources(ctx context.Context) ([]yahooPriceSource, error) {
+func (r *Repository) PriceSources(ctx context.Context, provider string) ([]priceSource, error) {
 	sources := builder.NewTable("instrument_price_sources")
 
 	query := builder.NewSelect()
@@ -126,53 +126,52 @@ func (r *Repository) YahooPriceSources(ctx context.Context) ([]yahooPriceSource,
 		builder.ColumnName{Table: sources, Name: "provider_symbol"},
 	)
 	query.Where(builder.WhereAnd{List: []builder.Where{
-		builder.WhereEq{Table: sources, Column: "provider", Value: ProviderYahoo},
+		builder.WhereEq{Table: sources, Column: "provider", Value: provider},
 		builder.WhereEq{Table: sources, Column: "enabled", Value: true},
 	}})
 	query.Order(builder.Order{Table: sources, Column: "instrument_id"})
 
 	sql, binds, errBuild := query.Get()
 	if errBuild != nil {
-		return nil, fmt.Errorf("build Yahoo price sources query: %w", errBuild)
+		return nil, fmt.Errorf("build price sources query: %w", errBuild)
 	}
 
 	rows, errQuery := r.db.Query(ctx, sql, pgx.NamedArgs(binds))
 	if errQuery != nil {
-		return nil, fmt.Errorf("query Yahoo price sources: %w", errQuery)
+		return nil, fmt.Errorf("query price sources: %w", errQuery)
 	}
 	defer rows.Close()
 
-	stored, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[yahooPriceSource])
+	stored, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[priceSource])
 	if errCollect != nil {
-		return nil, fmt.Errorf("collect Yahoo price sources: %w", errCollect)
+		return nil, fmt.Errorf("collect price sources: %w", errCollect)
 	}
 
 	return stored, nil
 }
 
-func (r *Repository) YahooMappedInstrumentIDs(ctx context.Context) (map[int64]struct{}, error) {
+func (r *Repository) MappedInstrumentIDs(ctx context.Context) (map[int64]struct{}, error) {
 	sources := builder.NewTable("instrument_price_sources")
 
 	query := builder.NewSelect()
 	query.From(sources)
 	query.Column(builder.ColumnName{Table: sources, Name: "instrument_id"})
-	query.Where(builder.WhereEq{Table: sources, Column: "provider", Value: ProviderYahoo})
 	query.Order(builder.Order{Table: sources, Column: "instrument_id"})
 
 	sql, binds, errBuild := query.Get()
 	if errBuild != nil {
-		return nil, fmt.Errorf("build Yahoo mapped instruments query: %w", errBuild)
+		return nil, fmt.Errorf("build mapped instruments query: %w", errBuild)
 	}
 
 	rows, errQuery := r.db.Query(ctx, sql, pgx.NamedArgs(binds))
 	if errQuery != nil {
-		return nil, fmt.Errorf("query Yahoo mapped instruments: %w", errQuery)
+		return nil, fmt.Errorf("query mapped instruments: %w", errQuery)
 	}
 	defer rows.Close()
 
 	instrumentIDs, errCollect := pgx.CollectRows(rows, pgx.RowTo[int64])
 	if errCollect != nil {
-		return nil, fmt.Errorf("collect Yahoo mapped instruments: %w", errCollect)
+		return nil, fmt.Errorf("collect mapped instruments: %w", errCollect)
 	}
 
 	result := make(map[int64]struct{}, len(instrumentIDs))
@@ -183,40 +182,246 @@ func (r *Repository) YahooMappedInstrumentIDs(ctx context.Context) (map[int64]st
 	return result, nil
 }
 
-func (r *Repository) CreateYahooPriceSources(ctx context.Context, items []yahooSourceMapping) (int, error) {
+func (r *Repository) AllPriceSources(ctx context.Context) ([]storedPriceSource, error) {
+	table := builder.NewTable("instrument_price_sources")
+
+	query := builder.NewSelect()
+	query.From(table)
+	query.Column(
+		builder.ColumnName{Table: table, Name: "id"},
+		builder.ColumnName{Table: table, Name: "instrument_id"},
+		builder.ColumnName{Table: table, Name: "provider"},
+		builder.ColumnName{Table: table, Name: "provider_symbol"},
+		builder.ColumnName{Table: table, Name: "enabled"},
+	)
+	query.Order(
+		builder.Order{Table: table, Column: "instrument_id"},
+		builder.Order{Table: table, Column: "provider"},
+	)
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return nil, fmt.Errorf("build all price sources query: %w", errBuild)
+	}
+
+	rows, errQuery := r.db.Query(ctx, sql, pgx.NamedArgs(binds))
+	if errQuery != nil {
+		return nil, fmt.Errorf("query all price sources: %w", errQuery)
+	}
+	defer rows.Close()
+
+	items, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[storedPriceSource])
+	if errCollect != nil {
+		return nil, fmt.Errorf("collect all price sources: %w", errCollect)
+	}
+
+	return items, nil
+}
+
+func (r *Repository) SetPriceSource(
+	ctx context.Context,
+	instrumentID int64,
+	provider string,
+	providerSymbol string,
+	enabled bool,
+) (storedPriceSource, bool, *appstate.PriceState, error) {
+	tx, errBegin := r.db.Begin(ctx)
+	if errBegin != nil {
+		return storedPriceSource{}, false, nil, fmt.Errorf("begin set price source transaction: %w", errBegin)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	table := builder.NewTable("instrument_price_sources")
+	query := builder.NewSelect()
+	query.From(table)
+	query.Column(
+		builder.ColumnName{Table: table, Name: "id"},
+		builder.ColumnName{Table: table, Name: "instrument_id"},
+		builder.ColumnName{Table: table, Name: "provider"},
+		builder.ColumnName{Table: table, Name: "provider_symbol"},
+		builder.ColumnName{Table: table, Name: "enabled"},
+	)
+	query.Where(builder.WhereEq{Table: table, Column: "instrument_id", Value: instrumentID})
+	query.Order(builder.Order{Table: table, Column: "provider"})
+
+	sql, binds, errBuild := query.Get()
+	if errBuild != nil {
+		return storedPriceSource{}, false, nil, fmt.Errorf("build instrument price sources query: %w", errBuild)
+	}
+
+	rows, errQuery := tx.Query(ctx, sql, pgx.NamedArgs(binds))
+	if errQuery != nil {
+		return storedPriceSource{}, false, nil, fmt.Errorf("query instrument price sources: %w", errQuery)
+	}
+
+	sources, errCollect := pgx.CollectRows(rows, pgx.RowToStructByNameLax[storedPriceSource])
+	if errCollect != nil {
+		return storedPriceSource{}, false, nil, fmt.Errorf("collect instrument price sources: %w", errCollect)
+	}
+
+	var current *storedPriceSource
+	changed := false
+	for index := range sources {
+		source := &sources[index]
+		if source.Provider == provider {
+			current = source
+			if source.ProviderSymbol != providerSymbol || source.Enabled != enabled {
+				changed = true
+			}
+			continue
+		}
+
+		if enabled && source.Enabled {
+			changed = true
+
+			update := builder.NewUpdate(table)
+			update.Set("enabled", false)
+			update.SetNow("updated_at")
+			update.Where(builder.WhereEq{Table: table, Column: "id", Value: source.ID})
+
+			sqlUpdate, bindsUpdate, errBuildUpdate := update.Get()
+			if errBuildUpdate != nil {
+				return storedPriceSource{}, false, nil, fmt.Errorf("build disable price source %d: %w", source.ID, errBuildUpdate)
+			}
+			if _, errExec := tx.Exec(ctx, sqlUpdate, pgx.NamedArgs(bindsUpdate)); errExec != nil {
+				return storedPriceSource{}, false, nil, fmt.Errorf("disable price source %d: %w", source.ID, errExec)
+			}
+		}
+	}
+
+	var selected storedPriceSource
+	if current == nil {
+		changed = true
+
+		insert := builder.NewInsert(table)
+		insert.Value("instrument_id", instrumentID)
+		insert.Value("provider", provider)
+		insert.Value("provider_symbol", providerSymbol)
+		insert.Value("enabled", enabled)
+		insert.Return(builder.ColumnName{Table: table, Name: "id"})
+
+		sqlInsert, bindsInsert, errBuildInsert := insert.Get()
+		if errBuildInsert != nil {
+			return storedPriceSource{}, false, nil, fmt.Errorf("build price source insert: %w", errBuildInsert)
+		}
+
+		rowsInsert, errQueryInsert := tx.Query(ctx, sqlInsert, pgx.NamedArgs(bindsInsert))
+		if errQueryInsert != nil {
+			return storedPriceSource{}, false, nil, fmt.Errorf("insert price source: %w", errQueryInsert)
+		}
+
+		id, errCollectInsert := pgx.CollectOneRow(rowsInsert, pgx.RowTo[int64])
+		if errCollectInsert != nil {
+			return storedPriceSource{}, false, nil, fmt.Errorf("collect inserted price source: %w", errCollectInsert)
+		}
+
+		selected = storedPriceSource{
+			ID:             id,
+			InstrumentID:   instrumentID,
+			Provider:       provider,
+			ProviderSymbol: providerSymbol,
+			Enabled:        enabled,
+		}
+	} else {
+		selected = *current
+		if selected.ProviderSymbol != providerSymbol || selected.Enabled != enabled {
+			update := builder.NewUpdate(table)
+			update.Set("provider_symbol", providerSymbol)
+			update.Set("enabled", enabled)
+			update.SetNow("updated_at")
+			update.Where(builder.WhereEq{Table: table, Column: "id", Value: selected.ID})
+
+			sqlUpdate, bindsUpdate, errBuildUpdate := update.Get()
+			if errBuildUpdate != nil {
+				return storedPriceSource{}, false, nil, fmt.Errorf("build price source update: %w", errBuildUpdate)
+			}
+			if _, errExec := tx.Exec(ctx, sqlUpdate, pgx.NamedArgs(bindsUpdate)); errExec != nil {
+				return storedPriceSource{}, false, nil, fmt.Errorf("update price source: %w", errExec)
+			}
+
+			selected.ProviderSymbol = providerSymbol
+			selected.Enabled = enabled
+		}
+	}
+
+	if !changed {
+		return selected, false, nil, nil
+	}
+
+	priceState, errState := loadPriceState(ctx, tx)
+	if errState != nil {
+		return storedPriceSource{}, false, nil, fmt.Errorf("load price state after source update: %w", errState)
+	}
+
+	if errCommit := tx.Commit(ctx); errCommit != nil {
+		return storedPriceSource{}, false, nil, fmt.Errorf("commit set price source transaction: %w", errCommit)
+	}
+
+	return selected, true, priceState, nil
+}
+
+func (r *Repository) CreatePriceSources(ctx context.Context, provider string, items []sourceMapping) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
 
 	tx, errBegin := r.db.Begin(ctx)
 	if errBegin != nil {
-		return 0, fmt.Errorf("begin Yahoo price source discovery transaction: %w", errBegin)
+		return 0, fmt.Errorf("begin price source discovery transaction: %w", errBegin)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	table := builder.NewTable("instrument_price_sources")
+	created := 0
+
 	for _, item := range items {
+		existing := builder.NewSelect()
+		existing.From(table)
+		existing.Column(builder.ColumnName{Table: table, Name: "id"})
+		existing.Where(builder.WhereEq{Table: table, Column: "instrument_id", Value: item.InstrumentID})
+		existing.Limit(1)
+
+		sqlExisting, bindsExisting, errBuildExisting := existing.Get()
+		if errBuildExisting != nil {
+			return 0, fmt.Errorf("build existing price source query for instrument %d: %w", item.InstrumentID, errBuildExisting)
+		}
+
+		rowsExisting, errQueryExisting := tx.Query(ctx, sqlExisting, pgx.NamedArgs(bindsExisting))
+		if errQueryExisting != nil {
+			return 0, fmt.Errorf("query existing price source for instrument %d: %w", item.InstrumentID, errQueryExisting)
+		}
+
+		_, errCollectExisting := pgx.CollectOneRow(rowsExisting, pgx.RowTo[int64])
+		if errCollectExisting == nil {
+			continue
+		}
+		if !errors.Is(errCollectExisting, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("collect existing price source for instrument %d: %w", item.InstrumentID, errCollectExisting)
+		}
+
 		query := builder.NewInsert(table)
 		query.Value("instrument_id", item.InstrumentID)
-		query.Value("provider", ProviderYahoo)
+		query.Value("provider", provider)
 		query.Value("provider_symbol", item.ProviderSymbol)
 		query.Value("enabled", true)
 
 		sql, binds, errBuild := query.Get()
 		if errBuild != nil {
-			return 0, fmt.Errorf("build Yahoo price source insert for instrument %d: %w", item.InstrumentID, errBuild)
+			return 0, fmt.Errorf("build price source insert for instrument %d: %w", item.InstrumentID, errBuild)
 		}
 
 		if _, errExec := tx.Exec(ctx, sql, pgx.NamedArgs(binds)); errExec != nil {
-			return 0, fmt.Errorf("insert Yahoo price source for instrument %d: %w", item.InstrumentID, errExec)
+			return 0, fmt.Errorf("insert price source for instrument %d: %w", item.InstrumentID, errExec)
 		}
+
+		created++
 	}
 
 	if errCommit := tx.Commit(ctx); errCommit != nil {
-		return 0, fmt.Errorf("commit Yahoo price source discovery transaction: %w", errCommit)
+		return 0, fmt.Errorf("commit price source discovery transaction: %w", errCommit)
 	}
 
-	return len(items), nil
+	return created, nil
 }
 
 func (r *Repository) ApplyFundUnitMOEXQuote(
@@ -248,22 +453,22 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 	return changed, stale, price, nil
 }
 
-func (r *Repository) ApplyYahooQuotes(ctx context.Context, items []yahooQuoteToApply, fetchedAt time.Time) (yahooApplyResult, error) {
-	result := yahooApplyResult{ChangedPrices: make([]appstate.InstrumentPrice, 0, len(items))}
+func (r *Repository) ApplyQuotes(ctx context.Context, provider string, items []quoteToApply, fetchedAt time.Time) (applyQuotesResult, error) {
+	result := applyQuotesResult{ChangedPrices: make([]appstate.InstrumentPrice, 0, len(items))}
 	if len(items) == 0 {
 		return result, nil
 	}
 
 	tx, errBegin := r.db.Begin(ctx)
 	if errBegin != nil {
-		return yahooApplyResult{}, fmt.Errorf("begin Yahoo prices transaction: %w", errBegin)
+		return applyQuotesResult{}, fmt.Errorf("begin %s prices transaction: %w", provider, errBegin)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, item := range items {
 		changed, stale, errApply := applyCurrentPriceQuote(ctx, tx, item.PriceSourceID, item.Quote, fetchedAt)
 		if errApply != nil {
-			return yahooApplyResult{}, fmt.Errorf("apply Yahoo price source %d: %w", item.PriceSourceID, errApply)
+			return applyQuotesResult{}, fmt.Errorf("apply %s price source %d: %w", provider, item.PriceSourceID, errApply)
 		}
 
 		if stale {
@@ -278,14 +483,14 @@ func (r *Repository) ApplyYahooQuotes(ctx context.Context, items []yahooQuoteToA
 
 		price, errPrice := loadInstrumentPrice(ctx, tx, item.PriceSourceID)
 		if errPrice != nil {
-			return yahooApplyResult{}, fmt.Errorf("load Yahoo price source %d after update: %w", item.PriceSourceID, errPrice)
+			return applyQuotesResult{}, fmt.Errorf("load %s price source %d after update: %w", provider, item.PriceSourceID, errPrice)
 		}
 
 		result.ChangedPrices = append(result.ChangedPrices, price)
 	}
 
 	if errCommit := tx.Commit(ctx); errCommit != nil {
-		return yahooApplyResult{}, fmt.Errorf("commit Yahoo prices transaction: %w", errCommit)
+		return applyQuotesResult{}, fmt.Errorf("commit %s prices transaction: %w", provider, errCommit)
 	}
 
 	return result, nil

@@ -32,7 +32,7 @@ func New(d *deps.Deps) *App {
 	stateManager := appstate.NewManager()
 	authModule := auth.NewModule(d.Config.Admin.Login, d.Config.Admin.PasswordHash)
 	fundModule := fund.NewModule(d.DB, d.ManagementCompany, stateManager)
-	priceModule := prices.NewModule(d.DB, d.MOEX, d.Yahoo, stateManager)
+	priceModule := prices.NewModule(d.DB, d.MOEX, d.Yahoo, stateManager, realtimeHub)
 	fxModule := fx.NewModule(d.DB, d.MOEX, stateManager)
 	schedulerModule := scheduler.NewModule(d.DB, realtimeHub)
 
@@ -55,10 +55,22 @@ func New(d *deps.Deps) *App {
 		schedulerjobs.MOEXUSDRUBSync(fxModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobMOEXSourcesDiscovery,
+		"MOEX source discovery",
+		"4 * * * *",
+		schedulerjobs.MOEXSourcesDiscovery(priceModule.Service),
+	)
+	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobYahooSourcesDiscovery,
 		"Yahoo source discovery",
 		"5 * * * *",
 		schedulerjobs.YahooSourcesDiscovery(priceModule.Service),
+	)
+	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobMOEXSecurityPricesSync,
+		"MOEX security prices sync",
+		"* * * * *",
+		schedulerjobs.MOEXSecurityPricesSync(priceModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobYahooPricesSync,
@@ -142,6 +154,18 @@ func (a *App) Routes() []routes.Route {
 			Method:  http.MethodPost,
 			Path:    "/api/v1/fund/market-history",
 			Handler: a.fund.Handler.MarketHistory,
+		},
+		{
+			Method:       http.MethodGet,
+			Path:         "/api/v1/admin/price-sources",
+			AuthRequired: true,
+			Handler:      a.prices.Handler.Sources,
+		},
+		{
+			Method:       http.MethodPost,
+			Path:         "/api/v1/admin/price-sources/set",
+			AuthRequired: true,
+			Handler:      a.prices.Handler.SetSource,
 		},
 		{
 			Method:       http.MethodGet,

@@ -9,21 +9,21 @@ import (
 	"github.com/rufond/fpr-backend/internal/scheduler"
 )
 
-const JobYahooSourcesDiscovery = "yahoo_sources_discovery"
+const JobMOEXSourcesDiscovery = "moex_sources_discovery"
 
-type yahooSourcesDiscoveryService interface {
-	DiscoverYahooSources(ctx context.Context) (*prices.YahooSourceDiscoveryResult, error)
+type moexSourcesDiscoveryService interface {
+	DiscoverMOEXSources(ctx context.Context) (*prices.MOEXSourceDiscoveryResult, error)
 }
 
-func YahooSourcesDiscovery(service yahooSourcesDiscoveryService) scheduler.JobFunc {
+func MOEXSourcesDiscovery(service moexSourcesDiscoveryService) scheduler.JobFunc {
 	return func(ctx context.Context, logger zerolog.Logger) (*scheduler.JobResult, error) {
-		result, err := service.DiscoverYahooSources(ctx)
+		result, err := service.DiscoverMOEXSources(ctx)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, isin := range result.MissingISINs {
-			logger.Debug().Str("isin", isin).Msg("Yahoo symbol not found")
+			logger.Debug().Str("isin", isin).Msg("MOEX symbol not found")
 		}
 
 		summary := map[string]any{
@@ -36,12 +36,12 @@ func YahooSourcesDiscovery(service yahooSourcesDiscoveryService) scheduler.JobFu
 		}
 
 		if result.CreatedSources == 0 {
-			logger.Debug().Interface("summary", summary).Msg("Yahoo source discovery noop")
+			logger.Debug().Interface("summary", summary).Msg("MOEX source discovery noop")
 
 			return scheduler.JobNoop(summary), nil
 		}
 
-		logger.Info().Interface("summary", summary).Msg("Yahoo source discovery completed")
+		logger.Info().Interface("summary", summary).Msg("MOEX source discovery completed")
 
 		return scheduler.JobCompleted(summary), nil
 	}
