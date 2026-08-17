@@ -33,7 +33,7 @@ func TestMOEXSecurityPricesSyncPublishesPriceDeltas(t *testing.T) {
 		ChangedPrices: []appstate.InstrumentPrice{
 			{InstrumentID: 51, UnitValue: "85.75", Currency: "RUB", PricedAt: pricedAt},
 		},
-	}}, publisher)
+	}}, fakeLiveValuationRefresher{}, publisher)
 
 	result, err := job(context.Background(), zerolog.Nop())
 	if err != nil {

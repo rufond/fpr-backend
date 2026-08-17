@@ -1,19 +1,28 @@
 package prices
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/rs/zerolog/log"
+
+	"github.com/rufond/fpr-backend/internal/appstate"
 	"github.com/rufond/fpr-backend/internal/realtime"
 	"github.com/rufond/fpr-backend/internal/routes"
 	govalidate "github.com/xloss/go-validate"
 	"github.com/xloss/go-validate/rules"
 )
 
+type LiveValuationRefresher interface {
+	Refresh(ctx context.Context) (appstate.FundLiveValuation, bool, error)
+}
+
 type Handler struct {
-	service   *Service
-	publisher realtime.Publisher
+	service            *Service
+	publisher          realtime.Publisher
+	valuationRefresher LiveValuationRefresher
 }
 
 func NewHandler(service *Service, publisher realtime.Publisher) *Handler {
@@ -25,6 +34,10 @@ func NewHandler(service *Service, publisher realtime.Publisher) *Handler {
 		service:   service,
 		publisher: publisher,
 	}
+}
+
+func (h *Handler) SetLiveValuationRefresher(service LiveValuationRefresher) {
+	h.valuationRefresher = service
 }
 
 type SetPriceSourceRequest struct {
@@ -98,6 +111,15 @@ func (h *Handler) SetSource(request routes.Request) (int, error, any) {
 			Scopes:        []string{realtime.ScopeInstrumentPrices},
 			InstrumentIDs: []int64{result.InstrumentID},
 		})
+
+		if h.valuationRefresher != nil {
+			live, changed, errValuation := h.valuationRefresher.Refresh(request.Context)
+			if errValuation != nil {
+				log.Error().Err(errValuation).Int64("instrument_id", result.InstrumentID).Msg("refresh live valuation after price source change")
+			} else if changed {
+				h.publisher.Publish(realtime.LiveValuationUpdate(live))
+			}
+		}
 	}
 
 	return http.StatusOK, nil, result

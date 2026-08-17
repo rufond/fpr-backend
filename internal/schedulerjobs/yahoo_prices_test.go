@@ -37,7 +37,7 @@ func TestYahooPricesSyncPublishesPriceDeltas(t *testing.T) {
 			{InstrumentID: 42, UnitValue: "126.32", Currency: "GBP", PricedAt: pricedAt},
 			{InstrumentID: 43, UnitValue: "81.5", Currency: "USD", PricedAt: pricedAt},
 		},
-	}}, publisher)
+	}}, fakeLiveValuationRefresher{}, publisher)
 
 	result, err := job(context.Background(), zerolog.Nop())
 	if err != nil {
@@ -70,7 +70,7 @@ func TestYahooPricesSyncNoopDoesNotPublish(t *testing.T) {
 		MissingSources:   1,
 		MissingSymbols:   []string{"BBB"},
 		UnchangedSources: 1,
-	}}, publisher)
+	}}, fakeLiveValuationRefresher{}, publisher)
 
 	result, err := job(context.Background(), zerolog.Nop())
 	if err != nil {
@@ -88,7 +88,7 @@ func TestYahooPricesSyncReturnsServiceError(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("Yahoo unavailable")
-	job := YahooPricesSync(fakeYahooPricesSyncService{err: wantErr}, nil)
+	job := YahooPricesSync(fakeYahooPricesSyncService{err: wantErr}, fakeLiveValuationRefresher{}, nil)
 
 	if _, err := job(context.Background(), zerolog.Nop()); !errors.Is(err, wantErr) {
 		t.Fatalf("job() error = %v, want %v", err, wantErr)

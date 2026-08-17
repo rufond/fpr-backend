@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/rufond/fpr-backend/internal/appstate"
 	"github.com/rufond/fpr-backend/internal/auth"
 	"github.com/rufond/fpr-backend/internal/deps"
@@ -14,6 +16,7 @@ import (
 	"github.com/rufond/fpr-backend/internal/routes"
 	"github.com/rufond/fpr-backend/internal/scheduler"
 	"github.com/rufond/fpr-backend/internal/schedulerjobs"
+	"github.com/rufond/fpr-backend/internal/valuation"
 )
 
 type App struct {
@@ -25,6 +28,7 @@ type App struct {
 	prices    *prices.Module
 	realtime  *realtime.Hub
 	scheduler *scheduler.Module
+	valuation *valuation.Module
 }
 
 func New(d *deps.Deps) *App {
@@ -34,13 +38,15 @@ func New(d *deps.Deps) *App {
 	fundModule := fund.NewModule(d.DB, d.ManagementCompany, stateManager)
 	priceModule := prices.NewModule(d.DB, d.MOEX, d.Yahoo, stateManager, realtimeHub)
 	fxModule := fx.NewModule(d.DB, d.MOEX, stateManager)
+	valuationModule := valuation.NewModule(d.DB, stateManager, priceModule.Service, fxModule.Service)
+	priceModule.Handler.SetLiveValuationRefresher(valuationModule.Service)
 	schedulerModule := scheduler.NewModule(d.DB, realtimeHub)
 
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobManagementCompanySync,
 		"Management company sync",
 		"0 * * * *",
-		schedulerjobs.ManagementCompanySync(fundModule.Service, realtimeHub),
+		schedulerjobs.ManagementCompanySync(fundModule.Service, valuationModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobMOEXFundUnitSync,
@@ -52,7 +58,7 @@ func New(d *deps.Deps) *App {
 		schedulerjobs.JobMOEXUSDRUBSync,
 		"MOEX USD/RUB sync",
 		"* * * * *",
-		schedulerjobs.MOEXUSDRUBSync(fxModule.Service, realtimeHub),
+		schedulerjobs.MOEXUSDRUBSync(fxModule.Service, valuationModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobMOEXSourcesDiscovery,
@@ -70,13 +76,13 @@ func New(d *deps.Deps) *App {
 		schedulerjobs.JobMOEXSecurityPricesSync,
 		"MOEX security prices sync",
 		"* * * * *",
-		schedulerjobs.MOEXSecurityPricesSync(priceModule.Service, realtimeHub),
+		schedulerjobs.MOEXSecurityPricesSync(priceModule.Service, valuationModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobYahooPricesSync,
 		"Yahoo prices sync",
 		"* * * * *",
-		schedulerjobs.YahooPricesSync(priceModule.Service, realtimeHub),
+		schedulerjobs.YahooPricesSync(priceModule.Service, valuationModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobMOEXFundUnitHistorySync,
@@ -93,6 +99,7 @@ func New(d *deps.Deps) *App {
 		prices:       priceModule,
 		realtime:     realtimeHub,
 		scheduler:    schedulerModule,
+		valuation:    valuationModule,
 	}
 }
 
@@ -105,6 +112,13 @@ func (a *App) Start(ctx context.Context) error {
 	}
 	if err := a.fx.Service.Start(ctx); err != nil {
 		return err
+	}
+	if err := a.valuation.Service.Start(ctx); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		log.Error().Err(err).Msg("start live valuation")
 	}
 
 	a.scheduler.Manager.Start(ctx)

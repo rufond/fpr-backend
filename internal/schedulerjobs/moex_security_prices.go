@@ -16,7 +16,7 @@ type moexSecurityPricesSyncService interface {
 	SyncMOEXSecurityPrices(ctx context.Context) (*prices.MOEXSecuritySyncResult, error)
 }
 
-func MOEXSecurityPricesSync(service moexSecurityPricesSyncService, publisher realtime.Publisher) scheduler.JobFunc {
+func MOEXSecurityPricesSync(service moexSecurityPricesSyncService, valuation liveValuationRefresher, publisher realtime.Publisher) scheduler.JobFunc {
 	if publisher == nil {
 		publisher = realtime.DiscardPublisher{}
 	}
@@ -64,6 +64,15 @@ func MOEXSecurityPricesSync(service moexSecurityPricesSyncService, publisher rea
 			Scopes:           []string{realtime.ScopeInstrumentPrices},
 			InstrumentPrices: deltas,
 		})
+
+		liveValuationChanged, errValuation := refreshLiveValuation(ctx, valuation, publisher)
+		summary["live_valuation_changed"] = liveValuationChanged
+		if errValuation != nil {
+			summary["live_valuation_error"] = errValuation.Error()
+			logger.Error().Err(errValuation).Msg("refresh live valuation after MOEX security prices sync")
+		} else {
+			summary["live_valuation_error"] = ""
+		}
 
 		logger.Info().Interface("summary", summary).Msg("MOEX security prices sync completed")
 

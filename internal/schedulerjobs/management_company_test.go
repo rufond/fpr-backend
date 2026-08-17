@@ -9,6 +9,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/rufond/fpr-backend/internal/appstate"
 	"github.com/rufond/fpr-backend/internal/fund"
 	"github.com/rufond/fpr-backend/internal/realtime"
 	"github.com/rufond/fpr-backend/internal/scheduler"
@@ -39,7 +40,7 @@ func TestManagementCompanySyncReturnsNoop(t *testing.T) {
 	}
 	publisher := &fakeRealtimePublisher{}
 
-	result, err := ManagementCompanySync(service, publisher)(context.Background(), zerolog.Nop())
+	result, err := ManagementCompanySync(service, fakeLiveValuationRefresher{}, publisher)(context.Background(), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("ManagementCompanySync() error = %v", err)
 	}
@@ -73,7 +74,7 @@ func TestManagementCompanySyncReturnsCompleted(t *testing.T) {
 	}
 	publisher := &fakeRealtimePublisher{}
 
-	result, err := ManagementCompanySync(service, publisher)(context.Background(), zerolog.Nop())
+	result, err := ManagementCompanySync(service, fakeLiveValuationRefresher{}, publisher)(context.Background(), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("ManagementCompanySync() error = %v", err)
 	}
@@ -111,7 +112,7 @@ func TestManagementCompanySyncPublishesHistoryOnly(t *testing.T) {
 	}
 	publisher := &fakeRealtimePublisher{}
 
-	_, err := ManagementCompanySync(service, publisher)(context.Background(), zerolog.Nop())
+	_, err := ManagementCompanySync(service, fakeLiveValuationRefresher{}, publisher)(context.Background(), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("ManagementCompanySync() error = %v", err)
 	}
@@ -134,7 +135,7 @@ func TestManagementCompanySyncDoesNotPublishFixedHistoryConflict(t *testing.T) {
 	}
 	publisher := &fakeRealtimePublisher{}
 
-	_, err := ManagementCompanySync(service, publisher)(context.Background(), zerolog.Nop())
+	_, err := ManagementCompanySync(service, fakeLiveValuationRefresher{}, publisher)(context.Background(), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("ManagementCompanySync() error = %v", err)
 	}
@@ -151,7 +152,7 @@ func TestManagementCompanySyncReturnsError(t *testing.T) {
 	service := &fakeManagementCompanySyncService{err: expected}
 	publisher := &fakeRealtimePublisher{}
 
-	result, err := ManagementCompanySync(service, publisher)(context.Background(), zerolog.Nop())
+	result, err := ManagementCompanySync(service, fakeLiveValuationRefresher{}, publisher)(context.Background(), zerolog.Nop())
 	if !errors.Is(err, expected) {
 		t.Fatalf("ManagementCompanySync() error = %v, want %v", err, expected)
 	}
@@ -160,5 +161,36 @@ func TestManagementCompanySyncReturnsError(t *testing.T) {
 	}
 	if len(publisher.updates) != 0 {
 		t.Fatalf("realtime updates = %#v, want none", publisher.updates)
+	}
+}
+
+func TestManagementCompanySyncCompletesWhenOnlyLiveValuationChanges(t *testing.T) {
+	t.Parallel()
+
+	service := &fakeManagementCompanySyncService{result: &fund.SyncResult{SourceHash: "hash"}}
+	publisher := &fakeRealtimePublisher{}
+	valuation := fakeLiveValuationRefresher{
+		changed: true,
+		live: appstate.FundLiveValuation{
+			ObservedAt:                      time.Date(2026, time.August, 17, 18, 0, 0, 0, time.UTC),
+			EstimatedNAVUSD:                 "1001",
+			EstimatedCalculatedUnitValueUSD: "10.01",
+			LiveDeltaUSD:                    "1",
+			LiveCoveragePercent:             "50",
+		},
+	}
+
+	result, err := ManagementCompanySync(service, valuation, publisher)(context.Background(), zerolog.Nop())
+	if err != nil {
+		t.Fatalf("ManagementCompanySync() error = %v", err)
+	}
+	if result.Status != scheduler.RunStatusCompleted {
+		t.Fatalf("status = %q, want %q", result.Status, scheduler.RunStatusCompleted)
+	}
+	if result.Summary["live_valuation_changed"] != true {
+		t.Fatalf("summary = %#v", result.Summary)
+	}
+	if len(publisher.updates) != 1 || !slices.Equal(publisher.updates[0].Scopes, []string{realtime.ScopeLiveValuation}) {
+		t.Fatalf("realtime updates = %#v", publisher.updates)
 	}
 }

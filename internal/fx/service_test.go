@@ -13,10 +13,18 @@ import (
 type fakeSource struct {
 	rate SourceRate
 	err  error
+
+	historicalRate   SourceRate
+	historicalExists bool
+	historicalErr    error
 }
 
 func (s fakeSource) FetchUSDRUB(context.Context) (SourceRate, error) {
 	return s.rate, s.err
+}
+
+func (s fakeSource) FetchUSDRUBAt(_ context.Context, _ time.Time) (SourceRate, bool, error) {
+	return s.historicalRate, s.historicalExists, s.historicalErr
 }
 
 type fakeRepository struct {
@@ -187,5 +195,33 @@ func TestSyncUSDRUBKeepsRAMOnRepositoryError(t *testing.T) {
 	}
 	if manager.Load() != initial {
 		t.Fatal("failed update replaced application state pointer")
+	}
+}
+
+func TestHistoricalUSDRUBReturnsHistoricalSourceRate(t *testing.T) {
+	t.Parallel()
+
+	pricedAt := time.Date(2026, time.August, 14, 20, 49, 0, 0, time.UTC)
+	service := NewService(nil, fakeSource{
+		historicalRate: SourceRate{
+			Provider:      ProviderMOEX,
+			BaseCurrency:  currency.USD,
+			QuoteCurrency: currency.RUB,
+			Rate:          "79.125",
+			PricedAt:      pricedAt,
+			Source:        "close",
+		},
+		historicalExists: true,
+	}, nil)
+
+	rate, exists, err := service.HistoricalUSDRUB(
+		context.Background(),
+		time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("HistoricalUSDRUB() error = %v", err)
+	}
+	if !exists || rate.Rate != "79.125" || !rate.PricedAt.Equal(pricedAt) {
+		t.Fatalf("rate = %#v, exists = %v", rate, exists)
 	}
 }

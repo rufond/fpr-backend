@@ -47,13 +47,35 @@ func (s *Service) MarketHistory(from *time.Time) (*MarketHistoryResult, error) {
 
 	result := &MarketHistoryResult{
 		UnitPrices: make([]StateIntradayMarketPrice, 0, len(series)-start),
+		LiveValues: []StateLiveValuePoint{},
 	}
+
 	for _, item := range series[start:] {
 		result.UnitPrices = append(result.UnitPrices, StateIntradayMarketPrice{
 			UnitValue: item.UnitValue,
 			Currency:  item.Currency,
 			PricedAt:  item.PricedAt,
 		})
+	}
+
+	if state.Valuation != nil && state.Valuation.SnapshotID == state.Fund.Snapshot.ID {
+		liveStart := 0
+		if from != nil {
+			liveStart, _ = slices.BinarySearchFunc(state.Valuation.Points, *from, func(item appstate.FundValuePoint, target time.Time) int {
+				return item.ObservedAt.Compare(target)
+			})
+		}
+
+		result.LiveValues = make([]StateLiveValuePoint, 0, len(state.Valuation.Points)-liveStart)
+		for _, item := range state.Valuation.Points[liveStart:] {
+			result.LiveValues = append(result.LiveValues, StateLiveValuePoint{
+				ObservedAt:                      item.ObservedAt,
+				EstimatedNAVUSD:                 item.EstimatedNAVUSD,
+				EstimatedCalculatedUnitValueUSD: item.EstimatedCalculatedUnitValueUSD,
+				LiveDeltaUSD:                    item.LiveDeltaUSD,
+				LiveCoveragePercent:             item.LiveCoveragePercent,
+			})
+		}
 	}
 
 	return result, nil
@@ -94,6 +116,17 @@ func buildStateResult(state *appstate.State) *StateResult {
 				Rate:     rate.Rate,
 				PricedAt: rate.PricedAt,
 			}
+		}
+	}
+
+	if state.Valuation != nil && state.Valuation.SnapshotID == fundState.Snapshot.ID {
+		live := state.Valuation.Current
+		result.Market.LiveValuation = &StateLiveValuation{
+			ObservedAt:                      live.ObservedAt,
+			EstimatedNAVUSD:                 live.EstimatedNAVUSD,
+			EstimatedCalculatedUnitValueUSD: live.EstimatedCalculatedUnitValueUSD,
+			LiveDeltaUSD:                    live.LiveDeltaUSD,
+			LiveCoveragePercent:             live.LiveCoveragePercent,
 		}
 	}
 

@@ -439,3 +439,76 @@ func TestFetchSecurityPricesUsesDynamicBoard(t *testing.T) {
 		t.Fatalf("issues = %#v", result.Issues)
 	}
 }
+
+func TestFetchSecurityDailyPricesUsesDailyCloseNotAfterOfficialDate(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/iss/securities/SPBE.json":
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["TQBR","stock","shares",1,1,"RUB"]]}}`))
+		case "/iss/engines/stock/markets/shares/boards/TQBR/securities/SPBE/candles.json":
+			if request.URL.Query().Get("interval") != "24" || request.URL.Query().Get("till") != "2026-08-14" {
+				t.Fatalf("query = %#v", request.URL.Query())
+			}
+			_, _ = writer.Write([]byte(`{
+				"candles":{"columns":["close","begin","end"],"data":[
+					[84.5,"2026-08-13 10:00:00","2026-08-13 18:45:00"],
+					[85.75,"2026-08-14 10:00:00","2026-08-14 18:45:00"]
+				]}
+			}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	till := time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC)
+	result, err := provider.FetchSecurityDailyPrices(context.Background(), []string{"SPBE"}, till)
+	if err != nil {
+		t.Fatalf("FetchSecurityDailyPrices() error = %v", err)
+	}
+
+	price, exists := result.PricesBySymbol["SPBE"]
+	if !exists || price.UnitValue != "85.75" || price.Currency != "RUB" || !price.PriceDate.Equal(till) {
+		t.Fatalf("price = %#v", price)
+	}
+	wantPricedAt := time.Date(2026, time.August, 14, 15, 45, 0, 0, time.UTC)
+	if !price.PricedAt.Equal(wantPricedAt) {
+		t.Fatalf("PricedAt = %s, want %s", price.PricedAt, wantPricedAt)
+	}
+}
+
+func TestFetchUSDRUBAtUsesCETSDailyCloseWithoutBoardDiscovery(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM/candles.json" {
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+		_, _ = writer.Write([]byte(`{
+			"candles":{"columns":["close","begin","end"],"data":[
+				[78.95,"2026-08-13 10:00:00","2026-08-13 23:49:00"],
+				[79.125,"2026-08-14 10:00:00","2026-08-14 23:49:00"]
+			]}
+		}`))
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	rate, exists, err := provider.FetchUSDRUBAt(
+		context.Background(),
+		time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("FetchUSDRUBAt() error = %v", err)
+	}
+	if !exists || rate.Provider != fx.ProviderMOEX || rate.Rate != "79.125" || rate.Source != "close" {
+		t.Fatalf("rate = %#v, exists = %v", rate, exists)
+	}
+	wantPricedAt := time.Date(2026, time.August, 14, 20, 49, 0, 0, time.UTC)
+	if !rate.PricedAt.Equal(wantPricedAt) {
+		t.Fatalf("PricedAt = %s, want %s", rate.PricedAt, wantPricedAt)
+	}
+}

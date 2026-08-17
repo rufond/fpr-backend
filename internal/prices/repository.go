@@ -324,7 +324,8 @@ func (r *Repository) SetPriceSource(
 		}
 	} else {
 		selected = *current
-		if selected.ProviderSymbol != providerSymbol || selected.Enabled != enabled {
+		symbolChanged := selected.ProviderSymbol != providerSymbol
+		if symbolChanged || selected.Enabled != enabled {
 			update := builder.NewUpdate(table)
 			update.Set("provider_symbol", providerSymbol)
 			update.Set("enabled", enabled)
@@ -337,6 +338,27 @@ func (r *Repository) SetPriceSource(
 			}
 			if _, errExec := tx.Exec(ctx, sqlUpdate, pgx.NamedArgs(bindsUpdate)); errExec != nil {
 				return storedPriceSource{}, false, nil, fmt.Errorf("update price source: %w", errExec)
+			}
+
+			if symbolChanged {
+				for _, tableName := range []string{
+					"fund_snapshot_price_baselines",
+					"instrument_daily_prices",
+					"instrument_price_points",
+					"instrument_prices",
+				} {
+					marketTable := builder.NewTable(tableName)
+					deleteMarketState := builder.NewDelete(marketTable)
+					deleteMarketState.Where(builder.WhereEq{Table: marketTable, Column: "price_source_id", Value: selected.ID})
+
+					sqlDelete, bindsDelete, errBuildDelete := deleteMarketState.Get()
+					if errBuildDelete != nil {
+						return storedPriceSource{}, false, nil, fmt.Errorf("build %s cleanup for price source %d: %w", tableName, selected.ID, errBuildDelete)
+					}
+					if _, errExec := tx.Exec(ctx, sqlDelete, pgx.NamedArgs(bindsDelete)); errExec != nil {
+						return storedPriceSource{}, false, nil, fmt.Errorf("clean %s for price source %d: %w", tableName, selected.ID, errExec)
+					}
+				}
 			}
 
 			selected.ProviderSymbol = providerSymbol

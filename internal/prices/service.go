@@ -584,6 +584,85 @@ func (s *Service) SetPriceSource(
 	return result, nil
 }
 
+func (s *Service) HistoricalPricesAt(ctx context.Context, sources []appstate.InstrumentPrice, till time.Time) (*HistoricalPricesResult, error) {
+	result := &HistoricalPricesResult{
+		PricesBySource: make(map[int64]SourceDailyPrice, len(sources)),
+	}
+	if len(sources) == 0 {
+		return result, nil
+	}
+
+	byProvider := make(map[string][]appstate.InstrumentPrice)
+	for _, source := range sources {
+		byProvider[source.Provider] = append(byProvider[source.Provider], source)
+	}
+
+	for provider, providerSources := range byProvider {
+		symbols := make([]string, 0, len(providerSources))
+		sourceIDsBySymbol := make(map[string][]int64, len(providerSources))
+		for _, source := range providerSources {
+			if _, exists := sourceIDsBySymbol[source.ProviderSymbol]; !exists {
+				symbols = append(symbols, source.ProviderSymbol)
+			}
+			sourceIDsBySymbol[source.ProviderSymbol] = append(sourceIDsBySymbol[source.ProviderSymbol], source.PriceSourceID)
+		}
+
+		var providerResult HistoricalSourceResult
+		var errFetch error
+		switch provider {
+		case ProviderMOEX:
+			providerResult, errFetch = s.source.FetchSecurityDailyPrices(ctx, symbols, till)
+		case ProviderYahoo:
+			providerResult, errFetch = s.yahoo.FetchDailyPrices(ctx, symbols, till)
+		default:
+			for _, source := range providerSources {
+				result.MissingSourceIDs = append(result.MissingSourceIDs, source.PriceSourceID)
+			}
+			continue
+		}
+		if errFetch != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+
+			for _, source := range providerSources {
+				result.Issues = append(result.Issues, HistoricalPriceSourceIssue{
+					PriceSourceID:  source.PriceSourceID,
+					Provider:       source.Provider,
+					ProviderSymbol: source.ProviderSymbol,
+					Error:          errFetch.Error(),
+				})
+			}
+			continue
+		}
+
+		for symbol, price := range providerResult.PricesBySymbol {
+			for _, priceSourceID := range sourceIDsBySymbol[symbol] {
+				result.PricesBySource[priceSourceID] = price
+			}
+		}
+
+		for _, symbol := range providerResult.MissingSymbols {
+			result.MissingSourceIDs = append(result.MissingSourceIDs, sourceIDsBySymbol[symbol]...)
+		}
+
+		for _, issue := range providerResult.Issues {
+			for _, priceSourceID := range sourceIDsBySymbol[issue.Symbol] {
+				result.Issues = append(result.Issues, HistoricalPriceSourceIssue{
+					PriceSourceID:  priceSourceID,
+					Provider:       provider,
+					ProviderSymbol: issue.Symbol,
+					Error:          issue.Error,
+				})
+			}
+		}
+	}
+
+	slices.Sort(result.MissingSourceIDs)
+
+	return result, nil
+}
+
 func currentUnmappedSecurityCandidates(state *appstate.State, mappedInstrumentIDs map[int64]struct{}) ([]sourceDiscoveryCandidate, int, int) {
 	candidates := make([]sourceDiscoveryCandidate, 0)
 	seenInstrumentIDs := make(map[int64]struct{})

@@ -25,6 +25,11 @@ type fakeSource struct {
 	securityResult  MOEXSourceResult
 	securityErr     error
 	securitySymbols []string
+
+	historicalResult  HistoricalSourceResult
+	historicalErr     error
+	historicalSymbols []string
+	historicalTill    time.Time
 }
 
 func (s *fakeSource) FetchFundUnitQuote(context.Context) (SourceQuote, error) {
@@ -49,6 +54,13 @@ func (s *fakeSource) FetchSecurityPrices(_ context.Context, symbols []string) (M
 	return s.securityResult, s.securityErr
 }
 
+func (s *fakeSource) FetchSecurityDailyPrices(_ context.Context, symbols []string, till time.Time) (HistoricalSourceResult, error) {
+	s.historicalSymbols = slices.Clone(symbols)
+	s.historicalTill = till
+
+	return s.historicalResult, s.historicalErr
+}
+
 type fakeYahooSource struct {
 	result  YahooSourceResult
 	err     error
@@ -58,6 +70,11 @@ type fakeYahooSource struct {
 	resolveResult YahooSymbolResolutionResult
 	resolveErr    error
 	resolveISINs  []string
+
+	historicalResult  HistoricalSourceResult
+	historicalErr     error
+	historicalSymbols []string
+	historicalTill    time.Time
 }
 
 func (s *fakeYahooSource) FetchPrices(_ context.Context, symbols []string) (YahooSourceResult, error) {
@@ -73,6 +90,13 @@ func (s *fakeYahooSource) ResolveSymbols(_ context.Context, isins []string) (Yah
 	s.resolveISINs = slices.Clone(isins)
 
 	return s.resolveResult, s.resolveErr
+}
+
+func (s *fakeYahooSource) FetchDailyPrices(_ context.Context, symbols []string, till time.Time) (HistoricalSourceResult, error) {
+	s.historicalSymbols = slices.Clone(symbols)
+	s.historicalTill = till
+
+	return s.historicalResult, s.historicalErr
 }
 
 type fakePriceRepository struct {
@@ -1036,5 +1060,54 @@ func TestSetPriceSourcePublishesPriceStateOnlyAfterRepositorySuccess(t *testing.
 	}
 	if manager.Load().Prices != nextPrices {
 		t.Fatal("price state was not published")
+	}
+}
+
+func TestHistoricalPricesAtUsesProviderDailySourcesAndLeavesUnsupportedMissing(t *testing.T) {
+	t.Parallel()
+
+	till := time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC)
+	moex := &fakeSource{historicalResult: HistoricalSourceResult{
+		PricesBySymbol: map[string]SourceDailyPrice{
+			"SPBE": {
+				PriceDate: time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC),
+				UnitValue: "85.5",
+				Currency:  "RUB",
+				PricedAt:  time.Date(2026, time.August, 14, 15, 45, 0, 0, time.UTC),
+			},
+		},
+	}}
+	yahoo := &fakeYahooSource{historicalResult: HistoricalSourceResult{
+		PricesBySymbol: map[string]SourceDailyPrice{
+			"FRHC": {
+				PriceDate: time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC),
+				UnitValue: "101.25",
+				Currency:  "USD",
+				PricedAt:  time.Date(2026, time.August, 14, 20, 0, 0, 0, time.UTC),
+			},
+		},
+	}}
+
+	service := NewService(nil, moex, yahoo, nil)
+	result, err := service.HistoricalPricesAt(context.Background(), []appstate.InstrumentPrice{
+		{PriceSourceID: 10, Provider: ProviderMOEX, ProviderSymbol: "SPBE"},
+		{PriceSourceID: 20, Provider: ProviderYahoo, ProviderSymbol: "FRHC"},
+		{PriceSourceID: 30, Provider: ProviderKASE, ProviderSymbol: "KMGZ"},
+	}, till)
+	if err != nil {
+		t.Fatalf("HistoricalPricesAt() error = %v", err)
+	}
+
+	if result.PricesBySource[10].UnitValue != "85.5" || result.PricesBySource[20].UnitValue != "101.25" {
+		t.Fatalf("PricesBySource = %#v", result.PricesBySource)
+	}
+	if len(result.MissingSourceIDs) != 1 || result.MissingSourceIDs[0] != 30 {
+		t.Fatalf("MissingSourceIDs = %#v", result.MissingSourceIDs)
+	}
+	if len(moex.historicalSymbols) != 1 || moex.historicalSymbols[0] != "SPBE" || !moex.historicalTill.Equal(till) {
+		t.Fatalf("MOEX request = %#v / %s", moex.historicalSymbols, moex.historicalTill)
+	}
+	if len(yahoo.historicalSymbols) != 1 || yahoo.historicalSymbols[0] != "FRHC" || !yahoo.historicalTill.Equal(till) {
+		t.Fatalf("Yahoo request = %#v / %s", yahoo.historicalSymbols, yahoo.historicalTill)
 	}
 }

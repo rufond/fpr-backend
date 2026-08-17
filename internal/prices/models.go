@@ -22,11 +22,13 @@ type Source interface {
 	FetchFundUnitDailyPrices(ctx context.Context, from time.Time) ([]SourceDailyPrice, error)
 	ResolveSecuritySymbols(ctx context.Context, isins []string) (MOEXSymbolResolutionResult, error)
 	FetchSecurityPrices(ctx context.Context, symbols []string) (MOEXSourceResult, error)
+	FetchSecurityDailyPrices(ctx context.Context, symbols []string, till time.Time) (HistoricalSourceResult, error)
 }
 
 type YahooSource interface {
 	FetchPrices(ctx context.Context, symbols []string) (YahooSourceResult, error)
 	ResolveSymbols(ctx context.Context, isins []string) (YahooSymbolResolutionResult, error)
+	FetchDailyPrices(ctx context.Context, symbols []string, till time.Time) (HistoricalSourceResult, error)
 }
 
 type SourceQuote struct {
@@ -40,6 +42,32 @@ type SourceDailyPrice struct {
 	PriceDate time.Time
 	UnitValue string
 	Currency  string
+	PricedAt  time.Time
+}
+
+type HistoricalPriceIssue struct {
+	Symbol string
+	Error  string
+}
+
+type HistoricalSourceResult struct {
+	RequestedSymbols int
+	PricesBySymbol   map[string]SourceDailyPrice
+	MissingSymbols   []string
+	Issues           []HistoricalPriceIssue
+}
+
+type HistoricalPriceSourceIssue struct {
+	PriceSourceID  int64
+	Provider       string
+	ProviderSymbol string
+	Error          string
+}
+
+type HistoricalPricesResult struct {
+	PricesBySource   map[int64]SourceDailyPrice
+	MissingSourceIDs []int64
+	Issues           []HistoricalPriceSourceIssue
 }
 
 type SyncResult struct {

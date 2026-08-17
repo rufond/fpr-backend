@@ -11,6 +11,7 @@ const ProviderMOEX = "moex"
 
 type Source interface {
 	FetchUSDRUB(ctx context.Context) (SourceRate, error)
+	FetchUSDRUBAt(ctx context.Context, till time.Time) (SourceRate, bool, error)
 }
 
 type SourceRate struct {

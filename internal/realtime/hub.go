@@ -31,6 +31,7 @@ type Event struct {
 	InstrumentIDs    []int64                `json:"instrument_ids,omitempty"`
 	InstrumentPrices []InstrumentPriceDelta `json:"instrument_prices,omitempty"`
 	FXRates          []FXRateDelta          `json:"fx_rates,omitempty"`
+	LiveValuation    *LiveValuationDelta    `json:"live_valuation,omitempty"`
 }
 
 type client struct {
@@ -141,6 +142,7 @@ func (h *Hub) Publish(update Update) {
 		InstrumentIDs:    instrumentIDs,
 		InstrumentPrices: slices.Clone(update.InstrumentPrices),
 		FXRates:          slices.Clone(update.FXRates),
+		LiveValuation:    update.LiveValuation,
 	}
 
 	for subscriber := range h.clients {

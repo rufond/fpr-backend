@@ -16,7 +16,7 @@ type yahooPricesSyncService interface {
 	SyncYahooPrices(ctx context.Context) (*prices.YahooSyncResult, error)
 }
 
-func YahooPricesSync(service yahooPricesSyncService, publisher realtime.Publisher) scheduler.JobFunc {
+func YahooPricesSync(service yahooPricesSyncService, valuation liveValuationRefresher, publisher realtime.Publisher) scheduler.JobFunc {
 	if publisher == nil {
 		publisher = realtime.DiscardPublisher{}
 	}
@@ -79,6 +79,15 @@ func YahooPricesSync(service yahooPricesSyncService, publisher realtime.Publishe
 			Scopes:           []string{realtime.ScopeInstrumentPrices},
 			InstrumentPrices: deltas,
 		})
+
+		liveValuationChanged, errValuation := refreshLiveValuation(ctx, valuation, publisher)
+		summary["live_valuation_changed"] = liveValuationChanged
+		if errValuation != nil {
+			summary["live_valuation_error"] = errValuation.Error()
+			logger.Error().Err(errValuation).Msg("refresh live valuation after Yahoo prices sync")
+		} else {
+			summary["live_valuation_error"] = ""
+		}
 
 		logger.Info().Interface("summary", summary).Msg("Yahoo prices sync completed")
 

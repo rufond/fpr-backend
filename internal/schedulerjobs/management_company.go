@@ -17,7 +17,7 @@ type managementCompanySyncService interface {
 	SyncManagementCompany(ctx context.Context) (*fund.SyncResult, error)
 }
 
-func ManagementCompanySync(service managementCompanySyncService, publisher realtime.Publisher) scheduler.JobFunc {
+func ManagementCompanySync(service managementCompanySyncService, valuation liveValuationRefresher, publisher realtime.Publisher) scheduler.JobFunc {
 	if publisher == nil {
 		publisher = realtime.DiscardPublisher{}
 	}
@@ -49,18 +49,28 @@ func ManagementCompanySync(service managementCompanySyncService, publisher realt
 			publisher.Publish(realtime.Update{Scopes: scopes})
 		}
 
+		liveValuationChanged, errValuation := refreshLiveValuation(ctx, valuation, publisher)
+		liveValuationError := ""
+		if errValuation != nil {
+			liveValuationError = errValuation.Error()
+			logger.Error().Err(errValuation).Msg("refresh live valuation after management company sync")
+		}
+
 		summary := map[string]any{
-			"source_hash":       result.SourceHash,
-			"history_inserted":  result.HistoryInserted,
-			"history_updated":   result.HistoryUpdated,
-			"history_conflicts": len(result.HistoryConflicts),
-			"snapshot_created":  result.SnapshotCreated,
+			"source_hash":            result.SourceHash,
+			"history_inserted":       result.HistoryInserted,
+			"history_updated":        result.HistoryUpdated,
+			"history_conflicts":      len(result.HistoryConflicts),
+			"snapshot_created":       result.SnapshotCreated,
+			"live_valuation_changed": liveValuationChanged,
+			"live_valuation_error":   liveValuationError,
 		}
 
 		if result.HistoryInserted == 0 &&
 			result.HistoryUpdated == 0 &&
 			len(result.HistoryConflicts) == 0 &&
-			!result.SnapshotCreated {
+			!result.SnapshotCreated &&
+			!liveValuationChanged {
 			logger.Debug().Interface("summary", summary).Msg("management company sync noop")
 			return scheduler.JobNoop(summary), nil
 		}

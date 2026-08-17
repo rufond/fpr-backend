@@ -1,6 +1,10 @@
 package realtime
 
-import "time"
+import (
+	"time"
+
+	"github.com/rufond/fpr-backend/internal/appstate"
+)
 
 const (
 	ScopeDiagnostics      = "diagnostics"
@@ -8,6 +12,7 @@ const (
 	ScopeFundState        = "fund_state"
 	ScopeFXRates          = "fx_rates"
 	ScopeInstrumentPrices = "instrument_prices"
+	ScopeLiveValuation    = "live_valuation"
 	ScopeScheduler        = "scheduler"
 )
 
@@ -25,11 +30,21 @@ type FXRateDelta struct {
 	PricedAt      time.Time `json:"priced_at"`
 }
 
+type LiveValuationDelta struct {
+	ObservedAt time.Time `json:"observed_at"`
+
+	EstimatedNAVUSD                 string `json:"estimated_nav_usd"`
+	EstimatedCalculatedUnitValueUSD string `json:"estimated_calculated_unit_value_usd"`
+	LiveDeltaUSD                    string `json:"live_delta_usd"`
+	LiveCoveragePercent             string `json:"live_coverage_percent"`
+}
+
 type Update struct {
 	Scopes           []string
 	InstrumentIDs    []int64
 	InstrumentPrices []InstrumentPriceDelta
 	FXRates          []FXRateDelta
+	LiveValuation    *LiveValuationDelta
 }
 
 type Publisher interface {
@@ -39,3 +54,16 @@ type Publisher interface {
 type DiscardPublisher struct{}
 
 func (DiscardPublisher) Publish(Update) {}
+
+func LiveValuationUpdate(live appstate.FundLiveValuation) Update {
+	return Update{
+		Scopes: []string{ScopeLiveValuation},
+		LiveValuation: &LiveValuationDelta{
+			ObservedAt:                      live.ObservedAt,
+			EstimatedNAVUSD:                 live.EstimatedNAVUSD,
+			EstimatedCalculatedUnitValueUSD: live.EstimatedCalculatedUnitValueUSD,
+			LiveDeltaUSD:                    live.LiveDeltaUSD,
+			LiveCoveragePercent:             live.LiveCoveragePercent,
+		},
+	}
+}

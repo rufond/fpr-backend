@@ -23,10 +23,11 @@ import (
 )
 
 const (
-	defaultBaseURL  = "https://iss.moex.com"
-	requestTimeout  = 15 * time.Second
-	maxResponseSize = 1 << 20
-	maxHistoryPages = 100
+	defaultBaseURL         = "https://iss.moex.com"
+	requestTimeout         = 15 * time.Second
+	maxResponseSize        = 1 << 20
+	maxHistoryPages        = 100
+	historicalLookbackDays = 45
 
 	usdRUBSecurityID = "USD000UTSTOM"
 	usdRUBBoardID    = "CETS"
@@ -155,6 +156,29 @@ func (p *Provider) FetchUSDRUB(ctx context.Context) (fx.SourceRate, error) {
 	}, nil
 }
 
+func (p *Provider) FetchUSDRUBAt(ctx context.Context, till time.Time) (fx.SourceRate, bool, error) {
+	price, exists, errPrice := p.fetchDailyClose(ctx, usdRUBSecurity, board{
+		ID:       usdRUBBoardID,
+		Currency: currency.RUB,
+	}, till)
+	if errPrice != nil {
+		return fx.SourceRate{}, false, fmt.Errorf("fetch historical MOEX USD/RUB close: %w", errPrice)
+	}
+
+	if !exists {
+		return fx.SourceRate{}, false, nil
+	}
+
+	return fx.SourceRate{
+		Provider:      fx.ProviderMOEX,
+		BaseCurrency:  currency.USD,
+		QuoteCurrency: currency.RUB,
+		Rate:          price.UnitValue,
+		PricedAt:      price.PricedAt,
+		Source:        "close",
+	}, true, nil
+}
+
 func (p *Provider) ResolveSecuritySymbols(ctx context.Context, isins []string) (prices.MOEXSymbolResolutionResult, error) {
 	result := prices.MOEXSymbolResolutionResult{
 		RequestedISINs: len(isins),
@@ -248,6 +272,55 @@ func (p *Provider) FetchSecurityPrices(ctx context.Context, symbols []string) (p
 			PricedAt:  quote.PricedAt,
 			Source:    quote.Source,
 		}
+	}
+
+	return result, nil
+}
+
+func (p *Provider) FetchSecurityDailyPrices(ctx context.Context, symbols []string, till time.Time) (prices.HistoricalSourceResult, error) {
+	result := prices.HistoricalSourceResult{
+		RequestedSymbols: len(symbols),
+		PricesBySymbol:   make(map[string]prices.SourceDailyPrice, len(symbols)),
+	}
+
+	for _, symbol := range symbols {
+		security := marketSecurity{
+			Engine:     "stock",
+			Market:     "shares",
+			SecurityID: symbol,
+		}
+
+		currentBoard, errBoard := p.resolveBoard(ctx, security, false)
+		if errBoard != nil {
+			if ctx.Err() != nil {
+				return prices.HistoricalSourceResult{}, ctx.Err()
+			}
+
+			result.Issues = append(result.Issues, prices.HistoricalPriceIssue{
+				Symbol: symbol,
+				Error:  errBoard.Error(),
+			})
+			continue
+		}
+
+		price, exists, errPrice := p.fetchDailyClose(ctx, security, currentBoard, till)
+		if errPrice != nil {
+			if ctx.Err() != nil {
+				return prices.HistoricalSourceResult{}, ctx.Err()
+			}
+
+			result.Issues = append(result.Issues, prices.HistoricalPriceIssue{
+				Symbol: symbol,
+				Error:  errPrice.Error(),
+			})
+			continue
+		}
+		if !exists {
+			result.MissingSymbols = append(result.MissingSymbols, symbol)
+			continue
+		}
+
+		result.PricesBySymbol[symbol] = price
 	}
 
 	return result, nil
@@ -362,6 +435,89 @@ func normalizeDailyPrices(items []prices.SourceDailyPrice) ([]prices.SourceDaily
 	}
 
 	return result, nil
+}
+
+func (p *Provider) fetchDailyClose(ctx context.Context, security marketSecurity, currentBoard board, till time.Time) (prices.SourceDailyPrice, bool, error) {
+	till = dateonly.UTC(till)
+	from := till.AddDate(0, 0, -historicalLookbackDays)
+
+	requestURL, errURL := url.Parse(
+		p.baseURL + "/iss/engines/" + url.PathEscape(security.Engine) +
+			"/markets/" + url.PathEscape(security.Market) +
+			"/boards/" + url.PathEscape(currentBoard.ID) +
+			"/securities/" + url.PathEscape(security.SecurityID) + "/candles.json",
+	)
+	if errURL != nil {
+		return prices.SourceDailyPrice{}, false, fmt.Errorf("build MOEX daily close URL for %s: %w", security.SecurityID, errURL)
+	}
+
+	query := requestURL.Query()
+	query.Set("iss.meta", "off")
+	query.Set("iss.only", "candles")
+	query.Set("candles.columns", "close,begin,end")
+	query.Set("interval", "24")
+	query.Set("from", from.Format(time.DateOnly))
+	query.Set("till", till.Format(time.DateOnly))
+	requestURL.RawQuery = query.Encode()
+
+	var payload issCandlesResponse
+	if err := p.fetchJSON(ctx, requestURL, &payload); err != nil {
+		return prices.SourceDailyPrice{}, false, fmt.Errorf("request MOEX daily close for %s: %w", security.SecurityID, err)
+	}
+
+	var latest prices.SourceDailyPrice
+	found := false
+
+	for _, data := range payload.Candles.Data {
+		row, ok := rowMap(payload.Candles.Columns, data)
+		if !ok {
+			return prices.SourceDailyPrice{}, false, fmt.Errorf("MOEX daily close for %s has invalid row shape", security.SecurityID)
+		}
+		if row["close"] == nil {
+			continue
+		}
+
+		unitValue, okValue := positiveDecimal(row["close"])
+		if !okValue {
+			return prices.SourceDailyPrice{}, false, fmt.Errorf("MOEX daily close for %s has invalid close value", security.SecurityID)
+		}
+
+		begin, okBegin := stringValue(row["begin"])
+		if !okBegin || len(begin) < len(time.DateOnly) {
+			return prices.SourceDailyPrice{}, false, fmt.Errorf("MOEX daily close for %s has invalid begin value", security.SecurityID)
+		}
+
+		priceDate, errDate := time.Parse(time.DateOnly, begin[:len(time.DateOnly)])
+		if errDate != nil {
+			return prices.SourceDailyPrice{}, false, fmt.Errorf("parse MOEX daily close date %q: %w", begin, errDate)
+		}
+
+		priceDate = dateonly.UTC(priceDate)
+		if priceDate.After(till) || found && !priceDate.After(latest.PriceDate) {
+			continue
+		}
+
+		pricedAt, errPricedAt := time.ParseInLocation(time.DateTime, begin, moscowLocation)
+		if end, okEnd := stringValue(row["end"]); okEnd {
+			if parsedEnd, errEnd := time.ParseInLocation(time.DateTime, end, moscowLocation); errEnd == nil {
+				pricedAt = parsedEnd
+				errPricedAt = nil
+			}
+		}
+		if errPricedAt != nil {
+			return prices.SourceDailyPrice{}, false, fmt.Errorf("parse MOEX daily close timestamp %q: %w", begin, errPricedAt)
+		}
+
+		latest = prices.SourceDailyPrice{
+			PriceDate: priceDate,
+			UnitValue: unitValue,
+			Currency:  currentBoard.Currency,
+			PricedAt:  pricedAt.UTC(),
+		}
+		found = true
+	}
+
+	return latest, found, nil
 }
 
 func (p *Provider) fetchQuoteWithBoardRefresh(ctx context.Context, security marketSecurity) (*marketQuote, error) {

@@ -327,3 +327,72 @@ func testStateManager(t *testing.T, instrumentID int64) *appstate.Manager {
 
 	return manager
 }
+
+func TestServiceStateIncludesLiveValuationFromRAM(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Date(2026, time.August, 17, 18, 30, 0, 0, time.UTC)
+	manager := appstate.NewManager()
+	if err := manager.Initialize(&appstate.State{
+		Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{
+			ID:                     21,
+			AsOfDate:               time.Date(2026, time.August, 16, 0, 0, 0, 0, time.UTC),
+			CalculatedUnitValueUSD: "31.18",
+			NAVUSD:                 "492986650",
+		}},
+		Valuation: &appstate.ValuationState{
+			SnapshotID: 21,
+			Current: appstate.FundLiveValuation{
+				SnapshotID:                      21,
+				ObservedAt:                      observedAt,
+				EstimatedNAVUSD:                 "493100000.25",
+				EstimatedCalculatedUnitValueUSD: "31.187169",
+				LiveDeltaUSD:                    "113350.25",
+				LiveCoveragePercent:             "74.5",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	result, err := NewService(nil, nil, manager).State()
+	if err != nil {
+		t.Fatalf("State() error = %v", err)
+	}
+	if result.Market.LiveValuation == nil {
+		t.Fatal("LiveValuation = nil")
+	}
+	if result.Market.LiveValuation.EstimatedNAVUSD != "493100000.25" ||
+		result.Market.LiveValuation.LiveDeltaUSD != "113350.25" ||
+		result.Market.LiveValuation.LiveCoveragePercent != "74.5" {
+		t.Fatalf("LiveValuation = %#v", result.Market.LiveValuation)
+	}
+}
+
+func TestServiceStateHidesLiveValuationForPreviousSnapshot(t *testing.T) {
+	t.Parallel()
+
+	manager := appstate.NewManager()
+	if err := manager.Initialize(&appstate.State{
+		Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{
+			ID:                     22,
+			AsOfDate:               time.Date(2026, time.August, 17, 0, 0, 0, 0, time.UTC),
+			CalculatedUnitValueUSD: "31.18",
+			NAVUSD:                 "492986650",
+		}},
+		Valuation: &appstate.ValuationState{
+			SnapshotID: 21,
+			Current:    appstate.FundLiveValuation{SnapshotID: 21},
+		},
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	result, err := NewService(nil, nil, manager).State()
+	if err != nil {
+		t.Fatalf("State() error = %v", err)
+	}
+	if result.Market.LiveValuation != nil {
+		t.Fatalf("LiveValuation = %#v, want nil", result.Market.LiveValuation)
+	}
+}

@@ -39,7 +39,7 @@ func TestMOEXUSDRUBSyncPublishesFXDelta(t *testing.T) {
 			Rate:          "79.125",
 			PricedAt:      pricedAt,
 		},
-	}}, publisher)
+	}}, fakeLiveValuationRefresher{}, publisher)
 
 	result, err := job(context.Background(), zerolog.Nop())
 	if err != nil {
@@ -75,7 +75,7 @@ func TestMOEXUSDRUBSyncNoopDoesNotPublish(t *testing.T) {
 			Rate:          "79",
 			PricedAt:      time.Date(2026, time.August, 14, 21, 0, 0, 0, time.UTC),
 		},
-	}}, publisher)
+	}}, fakeLiveValuationRefresher{}, publisher)
 
 	result, err := job(context.Background(), zerolog.Nop())
 	if err != nil {
@@ -93,7 +93,7 @@ func TestMOEXUSDRUBSyncReturnsServiceError(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("moex unavailable")
-	job := MOEXUSDRUBSync(fakeMOEXUSDRUBSyncService{err: wantErr}, nil)
+	job := MOEXUSDRUBSync(fakeMOEXUSDRUBSyncService{err: wantErr}, fakeLiveValuationRefresher{}, nil)
 
 	if _, err := job(context.Background(), zerolog.Nop()); !errors.Is(err, wantErr) {
 		t.Fatalf("job() error = %v, want %v", err, wantErr)

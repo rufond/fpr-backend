@@ -8,9 +8,10 @@ import (
 )
 
 type State struct {
-	Fund   *FundState
-	Prices *PriceState
-	FX     *FXState
+	Fund      *FundState
+	Prices    *PriceState
+	FX        *FXState
+	Valuation *ValuationState
 }
 
 type FXState struct {
@@ -35,6 +36,50 @@ type PriceState struct {
 	Sources     map[int64]InstrumentPrice
 	DailyPrices map[int64]InstrumentDailyPriceSeries
 	Points      map[int64]InstrumentPricePointSeries
+}
+
+type ValuationState struct {
+	SnapshotID int64
+	Baselines  map[int64]FundAssetPriceBaseline
+	Current    FundLiveValuation
+	Points     []FundValuePoint
+}
+
+type FundAssetPriceBaseline struct {
+	AssetID        int64
+	PriceSourceID  int64
+	Provider       string
+	ProviderSymbol string
+
+	UnitValue string
+	Currency  string
+	PricedAt  time.Time
+
+	FXRateToUSD string
+	FXProvider  string
+	FXPricedAt  time.Time
+
+	MarketValueUSD string
+}
+
+type FundLiveValuation struct {
+	SnapshotID int64
+	ObservedAt time.Time
+
+	EstimatedNAVUSD                 string
+	EstimatedCalculatedUnitValueUSD string
+	LiveDeltaUSD                    string
+	LiveCoveragePercent             string
+}
+
+type FundValuePoint struct {
+	SnapshotID int64
+	ObservedAt time.Time
+
+	EstimatedNAVUSD                 string
+	EstimatedCalculatedUnitValueUSD string
+	LiveDeltaUSD                    string
+	LiveCoveragePercent             string
 }
 
 type InstrumentDailyPriceSeries struct {

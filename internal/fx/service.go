@@ -53,6 +53,15 @@ func (s *Service) Start(ctx context.Context) error {
 	})
 }
 
+func (s *Service) HistoricalUSDRUB(ctx context.Context, till time.Time) (SourceRate, bool, error) {
+	rate, exists, err := s.source.FetchUSDRUBAt(ctx, till)
+	if err != nil {
+		return SourceRate{}, false, fmt.Errorf("fetch historical USD/RUB rate: %w", err)
+	}
+
+	return rate, exists, nil
+}
+
 func (s *Service) SyncUSDRUB(ctx context.Context) (*SyncResult, error) {
 	rate, errFetch := s.source.FetchUSDRUB(ctx)
 	if errFetch != nil {

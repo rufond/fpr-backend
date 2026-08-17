@@ -14,11 +14,22 @@ type HistoryResult struct {
 
 type MarketHistoryResult struct {
 	UnitPrices []StateIntradayMarketPrice `json:"unit_prices"`
+	LiveValues []StateLiveValuePoint      `json:"live_values"`
 }
 
 type StateMarket struct {
-	UnitPrice *StateMarketPrice `json:"unit_price"`
-	USDRUB    *StateFXRate      `json:"usd_rub"`
+	UnitPrice     *StateMarketPrice   `json:"unit_price"`
+	USDRUB        *StateFXRate        `json:"usd_rub"`
+	LiveValuation *StateLiveValuation `json:"live_valuation"`
+}
+
+type StateLiveValuation struct {
+	ObservedAt time.Time `json:"observed_at"`
+
+	EstimatedNAVUSD                 string `json:"estimated_nav_usd"`
+	EstimatedCalculatedUnitValueUSD string `json:"estimated_calculated_unit_value_usd"`
+	LiveDeltaUSD                    string `json:"live_delta_usd"`
+	LiveCoveragePercent             string `json:"live_coverage_percent"`
 }
 
 type StateFXRate struct {
@@ -88,4 +99,13 @@ type StateIntradayMarketPrice struct {
 	UnitValue string    `json:"unit_value"`
 	Currency  string    `json:"currency"`
 	PricedAt  time.Time `json:"priced_at"`
+}
+
+type StateLiveValuePoint struct {
+	ObservedAt time.Time `json:"observed_at"`
+
+	EstimatedNAVUSD                 string `json:"estimated_nav_usd"`
+	EstimatedCalculatedUnitValueUSD string `json:"estimated_calculated_unit_value_usd"`
+	LiveDeltaUSD                    string `json:"live_delta_usd"`
+	LiveCoveragePercent             string `json:"live_coverage_percent"`
 }

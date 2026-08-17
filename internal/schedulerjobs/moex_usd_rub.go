@@ -16,7 +16,7 @@ type moexUSDRUBSyncService interface {
 	SyncUSDRUB(ctx context.Context) (*fx.SyncResult, error)
 }
 
-func MOEXUSDRUBSync(service moexUSDRUBSyncService, publisher realtime.Publisher) scheduler.JobFunc {
+func MOEXUSDRUBSync(service moexUSDRUBSyncService, valuation liveValuationRefresher, publisher realtime.Publisher) scheduler.JobFunc {
 	if publisher == nil {
 		publisher = realtime.DiscardPublisher{}
 	}
@@ -51,6 +51,15 @@ func MOEXUSDRUBSync(service moexUSDRUBSyncService, publisher realtime.Publisher)
 				},
 			},
 		})
+
+		liveValuationChanged, errValuation := refreshLiveValuation(ctx, valuation, publisher)
+		summary["live_valuation_changed"] = liveValuationChanged
+		if errValuation != nil {
+			summary["live_valuation_error"] = errValuation.Error()
+			logger.Error().Err(errValuation).Msg("refresh live valuation after MOEX USD/RUB sync")
+		} else {
+			summary["live_valuation_error"] = ""
+		}
 
 		logger.Info().Interface("summary", summary).Msg("MOEX USD/RUB sync completed")
 		return scheduler.JobCompleted(summary), nil
