@@ -9,6 +9,7 @@ import (
 	"github.com/rufond/fpr-backend/internal/appstate"
 	"github.com/rufond/fpr-backend/internal/auth"
 	"github.com/rufond/fpr-backend/internal/deps"
+	"github.com/rufond/fpr-backend/internal/diagnostics"
 	"github.com/rufond/fpr-backend/internal/fund"
 	"github.com/rufond/fpr-backend/internal/fx"
 	"github.com/rufond/fpr-backend/internal/prices"
@@ -22,13 +23,14 @@ import (
 type App struct {
 	UserResolver routes.UserResolver
 
-	auth      *auth.Module
-	fund      *fund.Module
-	fx        *fx.Module
-	prices    *prices.Module
-	realtime  *realtime.Hub
-	scheduler *scheduler.Module
-	valuation *valuation.Module
+	auth        *auth.Module
+	diagnostics *diagnostics.Module
+	fund        *fund.Module
+	fx          *fx.Module
+	prices      *prices.Module
+	realtime    *realtime.Hub
+	scheduler   *scheduler.Module
+	valuation   *valuation.Module
 }
 
 func New(d *deps.Deps) *App {
@@ -41,6 +43,7 @@ func New(d *deps.Deps) *App {
 	valuationModule := valuation.NewModule(d.DB, stateManager, priceModule.Service, fxModule.Service)
 	priceModule.Handler.SetLiveValuationRefresher(valuationModule.Service)
 	schedulerModule := scheduler.NewModule(d.DB, realtimeHub)
+	diagnosticsModule := diagnostics.NewModule(stateManager, schedulerModule.Manager, schedulerModule.Repository, priceModule.Service)
 
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobManagementCompanySync,
@@ -94,6 +97,7 @@ func New(d *deps.Deps) *App {
 	return &App{
 		UserResolver: authModule.Service.ResolveUser,
 		auth:         authModule,
+		diagnostics:  diagnosticsModule,
 		fund:         fundModule,
 		fx:           fxModule,
 		prices:       priceModule,
@@ -168,6 +172,12 @@ func (a *App) Routes() []routes.Route {
 			Method:  http.MethodPost,
 			Path:    "/api/v1/fund/market-history",
 			Handler: a.fund.Handler.MarketHistory,
+		},
+		{
+			Method:       http.MethodGet,
+			Path:         "/api/v1/admin/diagnostics",
+			AuthRequired: true,
+			Handler:      a.diagnostics.Handler.List,
 		},
 		{
 			Method:       http.MethodGet,
