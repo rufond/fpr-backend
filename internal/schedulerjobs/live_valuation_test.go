@@ -34,6 +34,8 @@ func TestRefreshLiveValuationPublishesDelta(t *testing.T) {
 			ObservedAt:                      observedAt,
 			EstimatedNAVUSD:                 "493100000.25",
 			EstimatedCalculatedUnitValueUSD: "31.187169",
+			EstimatedCalculatedUnitValueRUB: "2472.95689",
+			PremiumDiscountPercent:          "-1.25",
 			LiveDeltaUSD:                    "113350.25",
 			LiveCoveragePercent:             "74.5",
 		},
@@ -54,5 +56,11 @@ func TestRefreshLiveValuationPublishesDelta(t *testing.T) {
 	}
 	if update.LiveValuation.EstimatedNAVUSD != "493100000.25" || update.LiveValuation.LiveCoveragePercent != "74.5" {
 		t.Fatalf("live valuation = %#v", update.LiveValuation)
+	}
+	if update.LiveValuation.EstimatedCalculatedUnitValueRUB == nil ||
+		*update.LiveValuation.EstimatedCalculatedUnitValueRUB != "2472.95689" ||
+		update.LiveValuation.PremiumDiscountPercent == nil ||
+		*update.LiveValuation.PremiumDiscountPercent != "-1.25" {
+		t.Fatalf("market comparison = %#v", update.LiveValuation)
 	}
 }

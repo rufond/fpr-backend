@@ -16,7 +16,7 @@ type moexFundUnitSyncService interface {
 	SyncFundUnitMOEX(ctx context.Context) (*prices.SyncResult, error)
 }
 
-func MOEXFundUnitSync(service moexFundUnitSyncService, publisher realtime.Publisher) scheduler.JobFunc {
+func MOEXFundUnitSync(service moexFundUnitSyncService, valuation liveValuationRefresher, publisher realtime.Publisher) scheduler.JobFunc {
 	if publisher == nil {
 		publisher = realtime.DiscardPublisher{}
 	}
@@ -52,6 +52,15 @@ func MOEXFundUnitSync(service moexFundUnitSyncService, publisher realtime.Publis
 				},
 			},
 		})
+
+		liveValuationChanged, errValuation := refreshLiveValuation(ctx, valuation, publisher)
+		summary["live_valuation_changed"] = liveValuationChanged
+		if errValuation != nil {
+			summary["live_valuation_error"] = errValuation.Error()
+			logger.Error().Err(errValuation).Msg("refresh live valuation after MOEX fund unit sync")
+		} else {
+			summary["live_valuation_error"] = ""
+		}
 
 		logger.Debug().Interface("summary", summary).Msg("MOEX fund unit sync completed")
 		return scheduler.JobCompleted(summary), nil

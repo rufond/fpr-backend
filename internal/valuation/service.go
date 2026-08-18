@@ -89,6 +89,10 @@ func (s *Service) Start(ctx context.Context) error {
 
 	prepared, errPrepare := s.prepareBaselines(ctx, current, valuationState.Baselines)
 	if errPrepare != nil {
+		if _, _, errApply := s.apply(ctx, current.Fund.Snapshot.ID, valuationState, nil); errApply != nil {
+			return errApply
+		}
+
 		return errPrepare
 	}
 
@@ -381,38 +385,42 @@ func (s *Service) apply(ctx context.Context, snapshotID int64, loaded *appstate.
 		}
 
 		force := valuationState.Current.SnapshotID != snapshotID
-		valuationChanged := force || len(persistedChanges) != 0 || !sameLiveValuation(valuationState.Current, calculated)
+		fundValueChanged := force || len(persistedChanges) != 0 || !sameFundValue(valuationState.Current, calculated)
+		marketComparisonChanged := !sameMarketComparison(valuationState.Current, calculated)
+		valuationChanged := fundValueChanged || marketComparisonChanged
 		live = calculated
 		changed = valuationChanged
 		if !valuationChanged {
 			return current, nil
 		}
 
-		point := valuePoint{
-			SnapshotID:                      calculated.SnapshotID,
-			ObservedAt:                      calculated.ObservedAt,
-			EstimatedNAVUSD:                 calculated.EstimatedNAVUSD,
-			EstimatedCalculatedUnitValueUSD: calculated.EstimatedCalculatedUnitValueUSD,
-			LiveDeltaUSD:                    calculated.LiveDeltaUSD,
-			LiveCoveragePercent:             calculated.LiveCoveragePercent,
-		}
-		cutoff := observedAt.Add(-valuePointRetention)
-		if errApply := s.repository.ApplyRefresh(ctx, persistedChanges, point, cutoff); errApply != nil {
-			return nil, errApply
-		}
-
 		points := slices.Clone(valuationState.Points)
-		points = append(points, appstate.FundValuePoint{
-			SnapshotID:                      calculated.SnapshotID,
-			ObservedAt:                      calculated.ObservedAt,
-			EstimatedNAVUSD:                 calculated.EstimatedNAVUSD,
-			EstimatedCalculatedUnitValueUSD: calculated.EstimatedCalculatedUnitValueUSD,
-			LiveDeltaUSD:                    calculated.LiveDeltaUSD,
-			LiveCoveragePercent:             calculated.LiveCoveragePercent,
-		})
-		points = slices.DeleteFunc(points, func(item appstate.FundValuePoint) bool {
-			return item.ObservedAt.Before(cutoff)
-		})
+		if fundValueChanged {
+			point := valuePoint{
+				SnapshotID:                      calculated.SnapshotID,
+				ObservedAt:                      calculated.ObservedAt,
+				EstimatedNAVUSD:                 calculated.EstimatedNAVUSD,
+				EstimatedCalculatedUnitValueUSD: calculated.EstimatedCalculatedUnitValueUSD,
+				LiveDeltaUSD:                    calculated.LiveDeltaUSD,
+				LiveCoveragePercent:             calculated.LiveCoveragePercent,
+			}
+			cutoff := observedAt.Add(-valuePointRetention)
+			if errApply := s.repository.ApplyRefresh(ctx, persistedChanges, point, cutoff); errApply != nil {
+				return nil, errApply
+			}
+
+			points = append(points, appstate.FundValuePoint{
+				SnapshotID:                      calculated.SnapshotID,
+				ObservedAt:                      calculated.ObservedAt,
+				EstimatedNAVUSD:                 calculated.EstimatedNAVUSD,
+				EstimatedCalculatedUnitValueUSD: calculated.EstimatedCalculatedUnitValueUSD,
+				LiveDeltaUSD:                    calculated.LiveDeltaUSD,
+				LiveCoveragePercent:             calculated.LiveCoveragePercent,
+			})
+			points = slices.DeleteFunc(points, func(item appstate.FundValuePoint) bool {
+				return item.ObservedAt.Before(cutoff)
+			})
+		}
 
 		next := new(*current)
 		next.Valuation = &appstate.ValuationState{
@@ -528,14 +536,61 @@ func calculateLiveValuation(state *appstate.State, baselines map[int64]appstate.
 		coveredShare.SetInt64(100)
 	}
 
+	estimatedUnitValueRUB, premiumDiscount, errComparison := calculateMarketComparison(state, estimatedUnitValue)
+	if errComparison != nil {
+		return appstate.FundLiveValuation{}, errComparison
+	}
+
 	return appstate.FundLiveValuation{
 		SnapshotID:                      state.Fund.Snapshot.ID,
 		ObservedAt:                      observedAt.UTC(),
 		EstimatedNAVUSD:                 decimalValue(estimatedNAV),
 		EstimatedCalculatedUnitValueUSD: decimalValue(estimatedUnitValue),
+		EstimatedCalculatedUnitValueRUB: estimatedUnitValueRUB,
+		PremiumDiscountPercent:          premiumDiscount,
 		LiveDeltaUSD:                    decimalValue(liveDelta),
 		LiveCoveragePercent:             decimalValue(coveredShare),
 	}, nil
+}
+
+func calculateMarketComparison(state *appstate.State, estimatedUnitValueUSD *big.Rat) (string, string, error) {
+	if state.FX == nil || state.Prices == nil {
+		return "", "", nil
+	}
+
+	usdRUB, exists := state.FX.Rates[appstate.FXPair{BaseCurrency: currency.USD, QuoteCurrency: currency.RUB}]
+	if !exists {
+		return "", "", nil
+	}
+
+	usdRUBValue, okRate := decimal.Parse(usdRUB.Rate)
+	if !okRate || usdRUBValue.Sign() <= 0 {
+		return "", "", fmt.Errorf("calculate live fund unit RUB value: trusted USD/RUB rate is invalid")
+	}
+
+	estimatedUnitValueRUB := new(big.Rat).Mul(estimatedUnitValueUSD, usdRUBValue)
+	if estimatedUnitValueRUB.Sign() <= 0 {
+		return "", "", fmt.Errorf("calculate live fund unit RUB value: estimated unit value is invalid")
+	}
+
+	for _, price := range state.Prices.Sources {
+		if price.ISIN != prices.FundUnitISIN || price.Provider != prices.ProviderMOEX || price.Currency != currency.RUB {
+			continue
+		}
+
+		marketValue, okPrice := decimal.Parse(price.UnitValue)
+		if !okPrice || marketValue.Sign() <= 0 {
+			return "", "", fmt.Errorf("calculate fund unit premium/discount: trusted MOEX unit price is invalid")
+		}
+
+		premiumDiscount := new(big.Rat).Quo(marketValue, estimatedUnitValueRUB)
+		premiumDiscount.Sub(premiumDiscount, big.NewRat(1, 1))
+		premiumDiscount.Mul(premiumDiscount, big.NewRat(100, 1))
+
+		return decimalValue(estimatedUnitValueRUB), decimalValue(premiumDiscount), nil
+	}
+
+	return "", "", nil
 }
 
 func currentFXRateToUSD(state *appstate.FXState, fromCurrency string) (string, bool, error) {
@@ -573,12 +628,25 @@ func decimalValue(value *big.Rat) string {
 	return text
 }
 
-func sameLiveValuation(left appstate.FundLiveValuation, right appstate.FundLiveValuation) bool {
+func sameFundValue(left appstate.FundLiveValuation, right appstate.FundLiveValuation) bool {
 	return left.SnapshotID == right.SnapshotID &&
 		decimal.Equal(left.EstimatedNAVUSD, right.EstimatedNAVUSD) &&
 		decimal.Equal(left.EstimatedCalculatedUnitValueUSD, right.EstimatedCalculatedUnitValueUSD) &&
 		decimal.Equal(left.LiveDeltaUSD, right.LiveDeltaUSD) &&
 		decimal.Equal(left.LiveCoveragePercent, right.LiveCoveragePercent)
+}
+
+func sameMarketComparison(left appstate.FundLiveValuation, right appstate.FundLiveValuation) bool {
+	return sameOptionalDecimal(left.EstimatedCalculatedUnitValueRUB, right.EstimatedCalculatedUnitValueRUB) &&
+		sameOptionalDecimal(left.PremiumDiscountPercent, right.PremiumDiscountPercent)
+}
+
+func sameOptionalDecimal(left string, right string) bool {
+	if left == "" || right == "" {
+		return left == right
+	}
+
+	return decimal.Equal(left, right)
 }
 
 func appStateBaseline(item baseline) appstate.FundAssetPriceBaseline {

@@ -33,10 +33,12 @@ type FXRateDelta struct {
 type LiveValuationDelta struct {
 	ObservedAt time.Time `json:"observed_at"`
 
-	EstimatedNAVUSD                 string `json:"estimated_nav_usd"`
-	EstimatedCalculatedUnitValueUSD string `json:"estimated_calculated_unit_value_usd"`
-	LiveDeltaUSD                    string `json:"live_delta_usd"`
-	LiveCoveragePercent             string `json:"live_coverage_percent"`
+	EstimatedNAVUSD                 string  `json:"estimated_nav_usd"`
+	EstimatedCalculatedUnitValueUSD string  `json:"estimated_calculated_unit_value_usd"`
+	EstimatedCalculatedUnitValueRUB *string `json:"estimated_calculated_unit_value_rub"`
+	PremiumDiscountPercent          *string `json:"premium_discount_percent"`
+	LiveDeltaUSD                    string  `json:"live_delta_usd"`
+	LiveCoveragePercent             string  `json:"live_coverage_percent"`
 }
 
 type Update struct {
@@ -56,14 +58,23 @@ type DiscardPublisher struct{}
 func (DiscardPublisher) Publish(Update) {}
 
 func LiveValuationUpdate(live appstate.FundLiveValuation) Update {
+	delta := &LiveValuationDelta{
+		ObservedAt:                      live.ObservedAt,
+		EstimatedNAVUSD:                 live.EstimatedNAVUSD,
+		EstimatedCalculatedUnitValueUSD: live.EstimatedCalculatedUnitValueUSD,
+		LiveDeltaUSD:                    live.LiveDeltaUSD,
+		LiveCoveragePercent:             live.LiveCoveragePercent,
+	}
+
+	if live.EstimatedCalculatedUnitValueRUB != "" {
+		delta.EstimatedCalculatedUnitValueRUB = new(live.EstimatedCalculatedUnitValueRUB)
+	}
+	if live.PremiumDiscountPercent != "" {
+		delta.PremiumDiscountPercent = new(live.PremiumDiscountPercent)
+	}
+
 	return Update{
-		Scopes: []string{ScopeLiveValuation},
-		LiveValuation: &LiveValuationDelta{
-			ObservedAt:                      live.ObservedAt,
-			EstimatedNAVUSD:                 live.EstimatedNAVUSD,
-			EstimatedCalculatedUnitValueUSD: live.EstimatedCalculatedUnitValueUSD,
-			LiveDeltaUSD:                    live.LiveDeltaUSD,
-			LiveCoveragePercent:             live.LiveCoveragePercent,
-		},
+		Scopes:        []string{ScopeLiveValuation},
+		LiveValuation: delta,
 	}
 }

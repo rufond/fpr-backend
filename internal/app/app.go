@@ -52,7 +52,7 @@ func New(d *deps.Deps) *App {
 		schedulerjobs.JobMOEXFundUnitSync,
 		"MOEX fund unit sync",
 		"* * * * *",
-		schedulerjobs.MOEXFundUnitSync(priceModule.Service, realtimeHub),
+		schedulerjobs.MOEXFundUnitSync(priceModule.Service, valuationModule.Service, realtimeHub),
 	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobMOEXUSDRUBSync,

@@ -68,6 +68,8 @@ type FundLiveValuation struct {
 
 	EstimatedNAVUSD                 string
 	EstimatedCalculatedUnitValueUSD string
+	EstimatedCalculatedUnitValueRUB string
+	PremiumDiscountPercent          string
 	LiveDeltaUSD                    string
 	LiveCoveragePercent             string
 }

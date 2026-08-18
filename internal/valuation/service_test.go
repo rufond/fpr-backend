@@ -22,6 +22,7 @@ type fakeRepository struct {
 	appliedBaselines []baseline
 	appliedPoint     valuePoint
 	appliedCutoff    time.Time
+	applyCalls       int
 }
 
 func (r *fakeRepository) LoadBaselines(context.Context, int64) (map[int64]baseline, error) {
@@ -41,6 +42,8 @@ func (r *fakeRepository) LoadValuePoints(context.Context, int64, time.Time) ([]v
 }
 
 func (r *fakeRepository) ApplyRefresh(_ context.Context, baselines []baseline, point valuePoint, cutoff time.Time) error {
+	r.applyCalls++
+
 	if r.applyErr != nil {
 		return r.applyErr
 	}
@@ -145,6 +148,9 @@ func TestStartBuildsBaselineFromHistoricalCloseAtOfficialDate(t *testing.T) {
 	if live.EstimatedNAVUSD != "1021" || live.EstimatedCalculatedUnitValueUSD != "10.21" || live.LiveDeltaUSD != "21" || live.LiveCoveragePercent != "30" {
 		t.Fatalf("live = %#v", live)
 	}
+	if live.EstimatedCalculatedUnitValueRUB != "816.8" || live.PremiumDiscountPercent != "-2.056807051909892262" {
+		t.Fatalf("market comparison = %#v", live)
+	}
 	if len(repository.appliedBaselines) != 2 {
 		t.Fatalf("applied baselines = %#v", repository.appliedBaselines)
 	}
@@ -194,6 +200,46 @@ func TestStartDoesNotUseCurrentQuoteWhenHistoricalBaselineIsMissing(t *testing.T
 	}
 }
 
+func TestStartPublishesPersistedValuationWhenHistoricalEnrichmentFails(t *testing.T) {
+	t.Parallel()
+
+	snapshotDate := time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC)
+	manager := appstate.NewManager()
+	if err := manager.Initialize(valuationTestState(snapshotDate)); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	wantErr := errors.New("historical source unavailable")
+	repository := &fakeRepository{baselines: map[int64]baseline{
+		1: {
+			AssetID:        1,
+			PriceSourceID:  10,
+			Provider:       prices.ProviderYahoo,
+			ProviderSymbol: "AAA",
+			MarketValueUSD: "200",
+		},
+	}}
+	service := NewService(
+		repository,
+		manager,
+		&fakeHistoricalPrices{err: wantErr},
+		&fakeHistoricalFX{},
+	)
+	service.now = func() time.Time { return time.Date(2026, time.August, 17, 12, 0, 0, 0, time.UTC) }
+
+	if err := service.Start(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Start() error = %v, want %v", err, wantErr)
+	}
+
+	current := manager.Load()
+	if current.Valuation == nil {
+		t.Fatal("Valuation = nil")
+	}
+	if current.Valuation.Current.LiveDeltaUSD != "20" || current.Valuation.Current.LiveCoveragePercent != "20" {
+		t.Fatalf("live valuation = %#v", current.Valuation.Current)
+	}
+}
+
 func TestStartKeepsRAMUnchangedWhenValuationPersistenceFails(t *testing.T) {
 	t.Parallel()
 
@@ -224,6 +270,7 @@ func valuationTestState(snapshotDate time.Time) *appstate.State {
 	instrument1 := int64(101)
 	instrument2 := int64(102)
 	instrument3 := int64(103)
+	fundUnitInstrument := int64(104)
 
 	return &appstate.State{
 		Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{
@@ -265,6 +312,16 @@ func valuationTestState(snapshotDate time.Time) *appstate.State {
 				Currency:       currency.KZT,
 				PricedAt:       time.Date(2026, time.August, 17, 10, 0, 0, 0, time.UTC),
 			},
+			40: {
+				PriceSourceID:  40,
+				InstrumentID:   fundUnitInstrument,
+				ISIN:           prices.FundUnitISIN,
+				Provider:       prices.ProviderMOEX,
+				ProviderSymbol: prices.FundUnitISIN,
+				UnitValue:      "800",
+				Currency:       currency.RUB,
+				PricedAt:       time.Date(2026, time.August, 17, 10, 0, 0, 0, time.UTC),
+			},
 		}},
 		FX: &appstate.FXState{Rates: map[appstate.FXPair]appstate.FXRate{
 			{BaseCurrency: currency.USD, QuoteCurrency: currency.RUB}: {
@@ -274,6 +331,77 @@ func valuationTestState(snapshotDate time.Time) *appstate.State {
 				Rate:          "80",
 			},
 		}},
+	}
+}
+
+func TestRecalculateDoesNotPersistPointWhenOnlyPremiumDiscountChanges(t *testing.T) {
+	t.Parallel()
+
+	snapshotDate := time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC)
+	state := valuationTestState(snapshotDate)
+	state.Valuation = &appstate.ValuationState{
+		SnapshotID: state.Fund.Snapshot.ID,
+		Baselines: map[int64]appstate.FundAssetPriceBaseline{
+			1: {
+				AssetID:        1,
+				PriceSourceID:  10,
+				Provider:       prices.ProviderYahoo,
+				ProviderSymbol: "AAA",
+				MarketValueUSD: "200",
+			},
+			2: {
+				AssetID:        2,
+				PriceSourceID:  20,
+				Provider:       prices.ProviderMOEX,
+				ProviderSymbol: "SPBE",
+				MarketValueUSD: "10",
+			},
+		},
+		Current: appstate.FundLiveValuation{
+			SnapshotID:                      state.Fund.Snapshot.ID,
+			EstimatedNAVUSD:                 "1021",
+			EstimatedCalculatedUnitValueUSD: "10.21",
+			EstimatedCalculatedUnitValueRUB: "816.8",
+			PremiumDiscountPercent:          "-3",
+			LiveDeltaUSD:                    "21",
+			LiveCoveragePercent:             "30",
+		},
+		Points: []appstate.FundValuePoint{
+			{
+				SnapshotID:                      state.Fund.Snapshot.ID,
+				ObservedAt:                      time.Date(2026, time.August, 17, 19, 0, 0, 0, time.UTC),
+				EstimatedNAVUSD:                 "1021",
+				EstimatedCalculatedUnitValueUSD: "10.21",
+				LiveDeltaUSD:                    "21",
+				LiveCoveragePercent:             "30",
+			},
+		},
+	}
+
+	manager := appstate.NewManager()
+	if err := manager.Initialize(state); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	repository := &fakeRepository{}
+	service := NewService(repository, manager, &fakeHistoricalPrices{}, &fakeHistoricalFX{})
+	service.now = func() time.Time { return time.Date(2026, time.August, 17, 20, 0, 0, 0, time.UTC) }
+
+	live, changed, err := service.Recalculate(context.Background())
+	if err != nil {
+		t.Fatalf("Recalculate() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false")
+	}
+	if live.PremiumDiscountPercent != "-2.056807051909892262" {
+		t.Fatalf("premium discount = %q", live.PremiumDiscountPercent)
+	}
+	if repository.applyCalls != 0 {
+		t.Fatalf("ApplyRefresh() calls = %d, want 0", repository.applyCalls)
+	}
+	if len(manager.Load().Valuation.Points) != 1 {
+		t.Fatalf("value points = %#v", manager.Load().Valuation.Points)
 	}
 }
 

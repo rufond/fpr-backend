@@ -347,6 +347,8 @@ func TestServiceStateIncludesLiveValuationFromRAM(t *testing.T) {
 				ObservedAt:                      observedAt,
 				EstimatedNAVUSD:                 "493100000.25",
 				EstimatedCalculatedUnitValueUSD: "31.187169",
+				EstimatedCalculatedUnitValueRUB: "2472.95689",
+				PremiumDiscountPercent:          "-1.25",
 				LiveDeltaUSD:                    "113350.25",
 				LiveCoveragePercent:             "74.5",
 			},
@@ -366,6 +368,12 @@ func TestServiceStateIncludesLiveValuationFromRAM(t *testing.T) {
 		result.Market.LiveValuation.LiveDeltaUSD != "113350.25" ||
 		result.Market.LiveValuation.LiveCoveragePercent != "74.5" {
 		t.Fatalf("LiveValuation = %#v", result.Market.LiveValuation)
+	}
+	if result.Market.LiveValuation.EstimatedCalculatedUnitValueRUB == nil ||
+		*result.Market.LiveValuation.EstimatedCalculatedUnitValueRUB != "2472.95689" ||
+		result.Market.LiveValuation.PremiumDiscountPercent == nil ||
+		*result.Market.LiveValuation.PremiumDiscountPercent != "-1.25" {
+		t.Fatalf("market comparison = %#v", result.Market.LiveValuation)
 	}
 }
 

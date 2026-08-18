@@ -26,10 +26,12 @@ type StateMarket struct {
 type StateLiveValuation struct {
 	ObservedAt time.Time `json:"observed_at"`
 
-	EstimatedNAVUSD                 string `json:"estimated_nav_usd"`
-	EstimatedCalculatedUnitValueUSD string `json:"estimated_calculated_unit_value_usd"`
-	LiveDeltaUSD                    string `json:"live_delta_usd"`
-	LiveCoveragePercent             string `json:"live_coverage_percent"`
+	EstimatedNAVUSD                 string  `json:"estimated_nav_usd"`
+	EstimatedCalculatedUnitValueUSD string  `json:"estimated_calculated_unit_value_usd"`
+	EstimatedCalculatedUnitValueRUB *string `json:"estimated_calculated_unit_value_rub"`
+	PremiumDiscountPercent          *string `json:"premium_discount_percent"`
+	LiveDeltaUSD                    string  `json:"live_delta_usd"`
+	LiveCoveragePercent             string  `json:"live_coverage_percent"`
 }
 
 type StateFXRate struct {

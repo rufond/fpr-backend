@@ -128,6 +128,13 @@ func buildStateResult(state *appstate.State) *StateResult {
 			LiveDeltaUSD:                    live.LiveDeltaUSD,
 			LiveCoveragePercent:             live.LiveCoveragePercent,
 		}
+
+		if live.EstimatedCalculatedUnitValueRUB != "" {
+			result.Market.LiveValuation.EstimatedCalculatedUnitValueRUB = new(live.EstimatedCalculatedUnitValueRUB)
+		}
+		if live.PremiumDiscountPercent != "" {
+			result.Market.LiveValuation.PremiumDiscountPercent = new(live.PremiumDiscountPercent)
+		}
 	}
 
 	for _, item := range fundState.Snapshot.Assets {
