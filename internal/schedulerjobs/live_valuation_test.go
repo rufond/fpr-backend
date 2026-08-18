@@ -15,6 +15,10 @@ type fakeLiveValuationRefresher struct {
 	err     error
 }
 
+func (f fakeLiveValuationRefresher) Recalculate(context.Context) (appstate.FundLiveValuation, bool, error) {
+	return f.live, f.changed, f.err
+}
+
 func (f fakeLiveValuationRefresher) Refresh(context.Context) (appstate.FundLiveValuation, bool, error) {
 	return f.live, f.changed, f.err
 }

@@ -34,7 +34,7 @@ func TestYahooPricesSyncPublishesPriceDeltas(t *testing.T) {
 		ReturnedSymbols:  2,
 		Batches:          1,
 		ChangedPrices: []appstate.InstrumentPrice{
-			{InstrumentID: 42, UnitValue: "126.32", Currency: "GBP", PricedAt: pricedAt},
+			{InstrumentID: 42, UnitValue: "126.32", Currency: "USD", PricedAt: pricedAt},
 			{InstrumentID: 43, UnitValue: "81.5", Currency: "USD", PricedAt: pricedAt},
 		},
 	}}, fakeLiveValuationRefresher{}, publisher)

@@ -683,7 +683,7 @@ func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
 	fetchedAt := time.Date(2026, time.August, 16, 15, 10, 5, 0, time.UTC)
 	repository := &fakePriceRepository{
 		priceSources: []priceSource{
-			{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: " dre2.f "},
+			{PriceSourceID: 10, InstrumentID: 42, ProviderSymbol: "FRHC"},
 			{PriceSourceID: 11, InstrumentID: 99, ProviderSymbol: "OLD"},
 		},
 		applyResult: applyQuotesResult{ChangedPrices: []appstate.InstrumentPrice{
@@ -694,9 +694,9 @@ func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
 				ISIN:           "DE000A3H2333",
 				Name:           "D2C",
 				Provider:       ProviderYahoo,
-				ProviderSymbol: "DRE2.F",
+				ProviderSymbol: "FRHC",
 				UnitValue:      "126.32",
-				Currency:       "GBP",
+				Currency:       "USD",
 				PricedAt:       pricedAt,
 				FetchedAt:      fetchedAt,
 			},
@@ -707,8 +707,8 @@ func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
 		ReturnedSymbols:  1,
 		Batches:          1,
 		QuotesByRequest: map[string]YahooSourceQuote{
-			" dre2.f ": {
-				Currency:  "GBP",
+			"FRHC": {
+				Currency:  "USD",
 				UnitValue: "126.32",
 				PricedAt:  pricedAt,
 			},
@@ -721,7 +721,7 @@ func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncYahooPrices() error = %v", err)
 	}
-	if len(source.symbols) != 1 || source.symbols[0] != " dre2.f " {
+	if len(source.symbols) != 1 || source.symbols[0] != "FRHC" {
 		t.Fatalf("fetched symbols = %#v, want configured Yahoo symbol", source.symbols)
 	}
 	if result.ExpectedSources != 1 || !result.Changed() || len(result.ChangedPrices) != 1 {
@@ -731,7 +731,7 @@ func TestSyncYahooPricesUpdatesOnlyCurrentCompositionSources(t *testing.T) {
 		t.Fatalf("applied Yahoo quotes = %#v", repository.appliedQuotes)
 	}
 	applied := repository.appliedQuotes[0]
-	if applied.PriceSourceID != 10 || applied.InstrumentID != 42 || applied.Quote.UnitValue != "126.32" || applied.Quote.Currency != "GBP" || !applied.Quote.PricedAt.Equal(pricedAt) {
+	if applied.PriceSourceID != 10 || applied.InstrumentID != 42 || applied.Quote.UnitValue != "126.32" || applied.Quote.Currency != "USD" || !applied.Quote.PricedAt.Equal(pricedAt) {
 		t.Fatalf("applied Yahoo quote = %#v", applied)
 	}
 

@@ -53,7 +53,7 @@ func MOEXFundUnitSync(service moexFundUnitSyncService, publisher realtime.Publis
 			},
 		})
 
-		logger.Info().Interface("summary", summary).Msg("MOEX fund unit sync completed")
+		logger.Debug().Interface("summary", summary).Msg("MOEX fund unit sync completed")
 		return scheduler.JobCompleted(summary), nil
 	}
 }

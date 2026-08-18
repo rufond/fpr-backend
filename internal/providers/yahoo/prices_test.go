@@ -13,11 +13,11 @@ func TestFetchPricesNormalizesQuotesAndKeepsInvalidPerSymbol(t *testing.T) {
 	client.responses = append(client.responses, jsonResponse(`{
 		"spark": {
 			"result": [
-				{"symbol": "AZN.L", "response": [{"meta": {
-					"currency": "GBp",
-					"symbol": "AZN.L",
+				{"symbol": "FRHC", "response": [{"meta": {
+					"currency": "USD",
+					"symbol": "FRHC",
 					"regularMarketTime": 1785771000,
-					"regularMarketPrice": 12632.0
+					"regularMarketPrice": 126.32
 				}}]},
 				{"symbol": "BAD", "response": [{"meta": {
 					"currency": "USD",
@@ -31,16 +31,16 @@ func TestFetchPricesNormalizesQuotesAndKeepsInvalidPerSymbol(t *testing.T) {
 	}`))
 
 	provider := newProvider(client, 20, 0)
-	result, err := provider.FetchPrices(context.Background(), []string{"AZN.L", "BAD"})
+	result, err := provider.FetchPrices(context.Background(), []string{"FRHC", "BAD"})
 	if err != nil {
 		t.Fatalf("FetchPrices() error = %v", err)
 	}
 
-	quoteObject, exists := result.QuotesByRequest["AZN.L"]
+	quoteObject, exists := result.QuotesByRequest["FRHC"]
 	if !exists {
 		t.Fatalf("quotes = %#v", result.QuotesByRequest)
 	}
-	if quoteObject.UnitValue != "126.32" || quoteObject.Currency != "GBP" || !quoteObject.PricedAt.Equal(time.Unix(1785771000, 0).UTC()) {
+	if quoteObject.UnitValue != "126.32" || quoteObject.Currency != "USD" || !quoteObject.PricedAt.Equal(time.Unix(1785771000, 0).UTC()) {
 		t.Fatalf("quote = %#v", quoteObject)
 	}
 	if len(result.Invalid) != 1 || result.Invalid[0].Symbol != "BAD" {

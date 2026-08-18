@@ -15,12 +15,12 @@ func TestFetchDailyPricesUsesLatestCloseNotAfterOfficialDate(t *testing.T) {
 		"chart": {
 			"result": [{
 				"meta": {
-					"currency": "GBp",
-					"exchangeTimezoneName": "Europe/London"
+					"currency": "USD",
+					"exchangeTimezoneName": "UTC"
 				},
 				"timestamp": [1786608000, 1786694400, 1786780800],
 				"indicators": {
-					"quote": [{"close": [12500, 12632, 13000]}]
+					"quote": [{"close": [125, 126.32, 130]}]
 				}
 			}],
 			"error": null
@@ -29,25 +29,25 @@ func TestFetchDailyPricesUsesLatestCloseNotAfterOfficialDate(t *testing.T) {
 
 	provider := newProvider(client, 20, 0)
 	till := time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC)
-	result, err := provider.FetchDailyPrices(context.Background(), []string{"AZN.L"}, till)
+	result, err := provider.FetchDailyPrices(context.Background(), []string{"FRHC"}, till)
 	if err != nil {
 		t.Fatalf("FetchDailyPrices() error = %v", err)
 	}
 
-	price, exists := result.PricesBySymbol["AZN.L"]
+	price, exists := result.PricesBySymbol["FRHC"]
 	if !exists {
 		t.Fatalf("PricesBySymbol = %#v", result.PricesBySymbol)
 	}
-	if price.UnitValue != "126.32" || price.Currency != "GBP" || !price.PriceDate.Equal(till) {
+	if price.UnitValue != "126.32" || price.Currency != "USD" || !price.PriceDate.Equal(till) {
 		t.Fatalf("price = %#v", price)
 	}
-	wantPricedAt := time.Date(2026, time.August, 14, 8, 0, 0, 0, time.UTC)
+	wantPricedAt := time.Unix(1786694400, 0).UTC()
 	if !price.PricedAt.Equal(wantPricedAt) {
 		t.Fatalf("PricedAt = %s, want %s", price.PricedAt, wantPricedAt)
 	}
 
 	request := client.requests[0]
-	if request.URL.Path != "/v8/finance/chart/AZN.L" {
+	if request.URL.Path != "/v8/finance/chart/FRHC" {
 		t.Fatalf("path = %q", request.URL.Path)
 	}
 	query := request.URL.Query()

@@ -119,6 +119,24 @@ func (s *Service) Refresh(ctx context.Context) (appstate.FundLiveValuation, bool
 	return s.apply(ctx, current.Fund.Snapshot.ID, valuationState, prepared)
 }
 
+func (s *Service) Recalculate(ctx context.Context) (appstate.FundLiveValuation, bool, error) {
+	current := s.state.Load()
+	if current == nil || current.Fund == nil {
+		return appstate.FundLiveValuation{}, false, fmt.Errorf("fund state is not initialized")
+	}
+
+	valuationState := current.Valuation
+	if valuationState == nil || valuationState.SnapshotID != current.Fund.Snapshot.ID {
+		loaded, errLoad := s.loadState(ctx, current.Fund.Snapshot.ID)
+		if errLoad != nil {
+			return appstate.FundLiveValuation{}, false, errLoad
+		}
+		valuationState = loaded
+	}
+
+	return s.apply(ctx, current.Fund.Snapshot.ID, valuationState, nil)
+}
+
 func (s *Service) loadState(ctx context.Context, snapshotID int64) (*appstate.ValuationState, error) {
 	baselines, errBaselines := s.repository.LoadBaselines(ctx, snapshotID)
 	if errBaselines != nil {

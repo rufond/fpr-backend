@@ -5,21 +5,21 @@ import (
 	"time"
 )
 
-func TestNormalizeCurrentQuotePreservesYahooPenceMeaning(t *testing.T) {
+func TestNormalizeCurrentQuoteUsesCanonicalCurrencyCode(t *testing.T) {
 	t.Parallel()
 
 	marketTime := time.Date(2026, time.August, 3, 15, 30, 0, 0, time.UTC)
 	result, err := normalizeCurrentQuote(quote{
-		Symbol:            " azn.l ",
-		Currency:          "GBp",
-		Price:             "12632.0",
+		Symbol:            "TEST",
+		Currency:          "USD",
+		Price:             "12.6320",
 		RegularMarketTime: marketTime,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if result.UnitValue != "126.32" || result.Currency != "GBP" {
+	if result.UnitValue != "12.632" || result.Currency != "USD" {
 		t.Fatalf("result = %#v", result)
 	}
 	if !result.PricedAt.Equal(marketTime) {
@@ -27,51 +27,19 @@ func TestNormalizeCurrentQuotePreservesYahooPenceMeaning(t *testing.T) {
 	}
 }
 
-func TestNormalizeCurrentQuoteDoesNotTreatGBPAsPence(t *testing.T) {
-	t.Parallel()
-
-	result, err := normalizeCurrentQuote(quote{
-		Symbol:            "VOD.L",
-		Currency:          "GBP",
-		Price:             "12.6320",
-		RegularMarketTime: time.Date(2026, time.August, 3, 15, 30, 0, 0, time.UTC),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if result.UnitValue != "12.632" || result.Currency != "GBP" {
-		t.Fatalf("result = %#v", result)
-	}
-}
-
-func TestNormalizeCurrentQuoteNormalizesGBXAndILA(t *testing.T) {
+func TestNormalizeCurrentQuoteRejectsProviderSpecificNonCurrencyUnits(t *testing.T) {
 	t.Parallel()
 
 	marketTime := time.Date(2026, time.August, 3, 15, 30, 0, 0, time.UTC)
-	tests := []struct {
-		currency string
-		price    string
-		want     string
-		wantCurr string
-	}{
-		{currency: "GBX", price: "1234", want: "12.34", wantCurr: "GBP"},
-		{currency: "ILA", price: "455.5", want: "4.555", wantCurr: "ILS"},
-	}
-
-	for _, test := range tests {
-		t.Run(test.currency, func(t *testing.T) {
-			result, err := normalizeCurrentQuote(quote{
+	for _, code := range []string{"GBp", "GBX", "ILA"} {
+		t.Run(code, func(t *testing.T) {
+			if _, err := normalizeCurrentQuote(quote{
 				Symbol:            "TEST",
-				Currency:          test.currency,
-				Price:             test.price,
+				Currency:          code,
+				Price:             "1234",
 				RegularMarketTime: marketTime,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if result.UnitValue != test.want || result.Currency != test.wantCurr {
-				t.Fatalf("result = %#v", result)
+			}); err == nil {
+				t.Fatal("expected error")
 			}
 		})
 	}

@@ -103,7 +103,7 @@ func TestStartBuildsBaselineFromHistoricalCloseAtOfficialDate(t *testing.T) {
 			30: {
 				PriceDate: snapshotDate,
 				UnitValue: "18000",
-				Currency:  "KZT",
+				Currency:  currency.KZT,
 				PricedAt:  time.Date(2026, time.August, 14, 10, 0, 0, 0, time.UTC),
 			},
 		},
@@ -262,7 +262,7 @@ func valuationTestState(snapshotDate time.Time) *appstate.State {
 				Provider:       prices.ProviderKASE,
 				ProviderSymbol: "KMGZ",
 				UnitValue:      "20000",
-				Currency:       "KZT",
+				Currency:       currency.KZT,
 				PricedAt:       time.Date(2026, time.August, 17, 10, 0, 0, 0, time.UTC),
 			},
 		}},
@@ -274,5 +274,36 @@ func valuationTestState(snapshotDate time.Time) *appstate.State {
 				Rate:          "80",
 			},
 		}},
+	}
+}
+
+func TestRecalculateDoesNotFetchMissingHistoricalBaselines(t *testing.T) {
+	t.Parallel()
+
+	state := valuationTestState(time.Date(2026, time.August, 14, 0, 0, 0, 0, time.UTC))
+	state.Valuation = &appstate.ValuationState{
+		SnapshotID: state.Fund.Snapshot.ID,
+		Baselines:  map[int64]appstate.FundAssetPriceBaseline{},
+	}
+
+	manager := appstate.NewManager()
+	if err := manager.Initialize(state); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	historical := &fakeHistoricalPrices{}
+	fxSource := &fakeHistoricalFX{}
+	repository := &fakeRepository{}
+	service := NewService(repository, manager, historical, fxSource)
+	service.now = func() time.Time { return time.Date(2026, time.August, 17, 20, 0, 0, 0, time.UTC) }
+
+	if _, _, err := service.Recalculate(context.Background()); err != nil {
+		t.Fatalf("Recalculate() error = %v", err)
+	}
+	if len(historical.sources) != 0 {
+		t.Fatalf("historical sources = %#v, want none", historical.sources)
+	}
+	if len(fxSource.tills) != 0 {
+		t.Fatalf("historical FX calls = %#v, want none", fxSource.tills)
 	}
 }

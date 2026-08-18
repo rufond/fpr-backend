@@ -743,20 +743,17 @@ func currentQuoteTime(row map[string]any) (time.Time, bool) {
 	}
 
 	systemTime, hasSystemTime := stringValue(row["SYSTIME"])
-	if hasSystemTime {
+	if hasSystemTime && hasTradeTime {
 		systemAt, err := time.ParseInLocation(time.DateTime, systemTime, moscowLocation)
 		if err == nil {
-			if hasTradeTime {
-				pricedAt, errTradeTime := time.ParseInLocation(
-					time.DateTime,
-					systemAt.Format(time.DateOnly)+" "+tradeTime,
-					moscowLocation,
-				)
-				if errTradeTime == nil {
-					return pricedAt, true
-				}
+			pricedAt, errTradeTime := time.ParseInLocation(
+				time.DateTime,
+				systemAt.Format(time.DateOnly)+" "+tradeTime,
+				moscowLocation,
+			)
+			if errTradeTime == nil {
+				return pricedAt, true
 			}
-			return systemAt, true
 		}
 	}
 

@@ -17,7 +17,7 @@ type managementCompanySyncService interface {
 	SyncManagementCompany(ctx context.Context) (*fund.SyncResult, error)
 }
 
-func ManagementCompanySync(service managementCompanySyncService, valuation liveValuationRefresher, publisher realtime.Publisher) scheduler.JobFunc {
+func ManagementCompanySync(service managementCompanySyncService, valuation liveValuationEnricher, publisher realtime.Publisher) scheduler.JobFunc {
 	if publisher == nil {
 		publisher = realtime.DiscardPublisher{}
 	}
@@ -49,11 +49,13 @@ func ManagementCompanySync(service managementCompanySyncService, valuation liveV
 			publisher.Publish(realtime.Update{Scopes: scopes})
 		}
 
-		liveValuationChanged, errValuation := refreshLiveValuation(ctx, valuation, publisher)
+		live, liveValuationChanged, errValuation := valuation.Refresh(ctx)
 		liveValuationError := ""
 		if errValuation != nil {
 			liveValuationError = errValuation.Error()
 			logger.Error().Err(errValuation).Msg("refresh live valuation after management company sync")
+		} else if liveValuationChanged {
+			publisher.Publish(realtime.LiveValuationUpdate(live))
 		}
 
 		summary := map[string]any{

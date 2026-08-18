@@ -29,16 +29,11 @@ func TestProviderFetchParsesCompactSparkResponse(t *testing.T) {
 	client := &fakeHTTPClient{responses: []*http.Response{jsonResponse(`{
 		"spark": {
 			"result": [{
-				"symbol": "AZN.L",
+				"symbol": "FRHC",
 				"response": [{"meta": {
-					"currency": "GBp",
-					"symbol": "AZN.L",
-					"exchangeName": "LSE",
-					"instrumentType": "EQUITY",
+					"currency": "USD",
 					"regularMarketTime": 1785771000,
-					"regularMarketPrice": 12632.0,
-					"previousClose": 12720.0,
-					"exchangeTimezoneName": "Europe/London"
+					"regularMarketPrice": 126.32
 				}}]
 			}],
 			"error": null
@@ -46,13 +41,13 @@ func TestProviderFetchParsesCompactSparkResponse(t *testing.T) {
 	}`)}}
 
 	provider := newProvider(client, 20, 0)
-	result, err := provider.fetch(context.Background(), []string{"AZN.L"})
+	result, err := provider.fetch(context.Background(), []string{"FRHC"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	quote := result.Quotes["AZN.L"]
-	if quote.Price != "12632.0" || quote.Currency != "GBp" {
+	quote := result.Quotes["FRHC"]
+	if quote.Price != "126.32" || quote.Currency != "USD" {
 		t.Fatalf("quote = %#v", quote)
 	}
 	if quote.RegularMarketTime.IsZero() {
@@ -63,7 +58,7 @@ func TestProviderFetchParsesCompactSparkResponse(t *testing.T) {
 	}
 
 	request := client.requests[0]
-	if !strings.Contains(request.URL.RawQuery, "symbols=AZN.L") || !strings.Contains(request.URL.RawQuery, "range=5m") {
+	if !strings.Contains(request.URL.RawQuery, "symbols=FRHC") || !strings.Contains(request.URL.RawQuery, "range=5m") {
 		t.Fatalf("query = %q", request.URL.RawQuery)
 	}
 	if values := request.Header["user-agent"]; len(values) != 1 || values[0] != chromeUserAgent {

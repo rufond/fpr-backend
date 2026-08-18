@@ -146,6 +146,38 @@ func TestFetchFundUnitQuoteRefreshesBoardAfterQuoteFailure(t *testing.T) {
 	}
 }
 
+func TestFetchFundUnitQuoteDoesNotTreatSystemTimeAsPriceTime(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/iss/securities/RU000A101NK4.json":
+			_, _ = writer.Write([]byte(`{"boards":{"columns":["boardid","engine","market","is_traded","is_primary","currencyid"],"data":[["TQIF","stock","shares",1,1,"RUB"]]}}`))
+		case "/iss/engines/stock/markets/shares/boards/TQIF/securities/RU000A101NK4/securities.json":
+			_, _ = writer.Write([]byte(`{
+				"marketdata":{"columns":["LAST","SYSTIME"],"data":[[3210.5,"2026-08-17 23:59:00"]]},
+				"securities":{"columns":["PREVPRICE","PREVDATE"],"data":[[3200,"2026-08-15"]]}
+			}`))
+		default:
+			t.Fatalf("unexpected path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, server.Client())
+	quote, err := provider.FetchFundUnitQuote(context.Background())
+	if err != nil {
+		t.Fatalf("FetchFundUnitQuote() error = %v", err)
+	}
+
+	if quote.UnitValue != "3200" || quote.Source != "previous" {
+		t.Fatalf("quote = %#v", quote)
+	}
+	if quote.PricedAt.Equal(time.Date(2026, time.August, 17, 20, 59, 0, 0, time.UTC)) {
+		t.Fatalf("PricedAt incorrectly uses SYSTIME: %s", quote.PricedAt)
+	}
+}
+
 func TestFetchFundUnitQuoteFallsBackToPreviousPriceAndBoardCurrency(t *testing.T) {
 	t.Parallel()
 

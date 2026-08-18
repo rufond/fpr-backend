@@ -61,7 +61,7 @@ func MOEXUSDRUBSync(service moexUSDRUBSyncService, valuation liveValuationRefres
 			summary["live_valuation_error"] = ""
 		}
 
-		logger.Info().Interface("summary", summary).Msg("MOEX USD/RUB sync completed")
+		logger.Debug().Interface("summary", summary).Msg("MOEX USD/RUB sync completed")
 		return scheduler.JobCompleted(summary), nil
 	}
 }

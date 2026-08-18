@@ -89,7 +89,7 @@ func YahooPricesSync(service yahooPricesSyncService, valuation liveValuationRefr
 			summary["live_valuation_error"] = ""
 		}
 
-		logger.Info().Interface("summary", summary).Msg("Yahoo prices sync completed")
+		logger.Debug().Interface("summary", summary).Msg("Yahoo prices sync completed")
 
 		return scheduler.JobCompleted(summary), nil
 	}

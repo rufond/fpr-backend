@@ -74,7 +74,7 @@ func MOEXSecurityPricesSync(service moexSecurityPricesSyncService, valuation liv
 			summary["live_valuation_error"] = ""
 		}
 
-		logger.Info().Interface("summary", summary).Msg("MOEX security prices sync completed")
+		logger.Debug().Interface("summary", summary).Msg("MOEX security prices sync completed")
 
 		return scheduler.JobCompleted(summary), nil
 	}

@@ -326,9 +326,7 @@ func (m *Manager) logRunFinished(
 
 	if status == RunStatusFailed {
 		event = log.Error()
-	}
-
-	if status == RunStatusNoop && runSource == RunSourceSchedule {
+	} else if runSource == RunSourceSchedule {
 		event = log.Debug()
 	}
 

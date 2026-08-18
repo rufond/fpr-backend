@@ -161,7 +161,7 @@ func (p *Provider) fetchDailyPrice(ctx context.Context, symbol string, till time
 		)
 	}
 
-	currencyCode, decimalShift, errCurrency := normalizeQuoteCurrency(chart.Meta.Currency)
+	currencyCode, errCurrency := normalizeQuoteCurrency(chart.Meta.Currency)
 	if errCurrency != nil {
 		return prices.SourceDailyPrice{}, false, fmt.Errorf("Yahoo daily chart for %s: %w", symbol, errCurrency)
 	}
@@ -183,7 +183,7 @@ func (p *Provider) fetchDailyPrice(ctx context.Context, symbol string, till time
 			continue
 		}
 
-		unitValue, errValue := normalizePositiveDecimal(closes[index].Text, decimalShift)
+		unitValue, errValue := normalizePositiveDecimal(closes[index].Text)
 		if errValue != nil {
 			return prices.SourceDailyPrice{}, false, fmt.Errorf("Yahoo daily close for %s: %w", symbol, errValue)
 		}

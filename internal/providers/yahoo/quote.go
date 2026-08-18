@@ -16,12 +16,12 @@ type normalizedQuote struct {
 }
 
 func normalizeCurrentQuote(quote quote) (normalizedQuote, error) {
-	currencyCode, decimalShift, errCurrency := normalizeQuoteCurrency(quote.Currency)
+	currencyCode, errCurrency := normalizeQuoteCurrency(quote.Currency)
 	if errCurrency != nil {
 		return normalizedQuote{}, errCurrency
 	}
 
-	unitValue, errPrice := normalizePositiveDecimal(quote.Price, decimalShift)
+	unitValue, errPrice := normalizePositiveDecimal(quote.Price)
 	if errPrice != nil {
 		return normalizedQuote{}, fmt.Errorf("Yahoo price: %w", errPrice)
 	}
@@ -37,32 +37,17 @@ func normalizeCurrentQuote(quote quote) (normalizedQuote, error) {
 	}, nil
 }
 
-func normalizeQuoteCurrency(value string) (string, int, error) {
+func normalizeQuoteCurrency(value string) (string, error) {
 	code := strings.TrimSpace(value)
-
-	// Yahoo uses the case-sensitive GBp form for prices quoted in pence.
-	// Uppercasing first would turn it into GBP and silently multiply the
-	// position value by 100.
-	if code == "GBp" {
-		return "GBP", 2, nil
-	}
-
-	code = strings.ToUpper(code)
 	switch code {
-	case "GBX":
-		return "GBP", 2, nil
-	case "ILA":
-		return "ILS", 2, nil
+	case currency.USD, currency.RUB, currency.KZT:
+		return code, nil
+	default:
+		return "", fmt.Errorf("Yahoo price currency %q is unsupported", value)
 	}
-
-	if !currency.ValidCode(code) {
-		return "", 0, fmt.Errorf("Yahoo price currency %q is invalid", value)
-	}
-
-	return code, 0, nil
 }
 
-func normalizePositiveDecimal(value string, decimalShift int) (string, error) {
+func normalizePositiveDecimal(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", fmt.Errorf("value is empty")
@@ -72,13 +57,9 @@ func normalizePositiveDecimal(value string, decimalShift int) (string, error) {
 	if !valid {
 		return "", fmt.Errorf("value %q is not a decimal number", value)
 	}
+
 	if number.Sign() <= 0 {
 		return "", fmt.Errorf("value must be positive")
-	}
-
-	if decimalShift > 0 {
-		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimalShift)), nil)
-		number.Quo(number, new(big.Rat).SetInt(divisor))
 	}
 
 	return finiteDecimal(number)

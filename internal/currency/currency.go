@@ -1,6 +1,7 @@
 package currency
 
 const (
+	KZT = "KZT"
 	RUB = "RUB"
 	USD = "USD"
 )
