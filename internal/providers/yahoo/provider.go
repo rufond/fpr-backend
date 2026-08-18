@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	stdhttp "net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
-	tlsclient "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 )
 
 const (
@@ -35,6 +34,11 @@ type Provider struct {
 	client       httpClient
 	batchSize    int
 	requestDelay time.Duration
+
+	proxyMode       string
+	proxyListURL    string
+	proxyListClient proxyListHTTPClient
+	clientFactory   httpClientFactory
 }
 
 type quote struct {
@@ -106,18 +110,54 @@ type sparkMeta struct {
 	RegularMarketPrice decimalNumber `json:"regularMarketPrice"`
 }
 
-func NewProvider() (*Provider, error) {
-	client, err := tlsclient.NewHttpClient(
-		tlsclient.NewNoopLogger(),
-		tlsclient.WithTimeoutMilliseconds(int(defaultTimeout.Milliseconds())),
-		tlsclient.WithClientProfile(profiles.Chrome_146),
-		tlsclient.WithDisableHttp3(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create Yahoo TLS client: %w", err)
+func NewProvider(proxy ProxyConfig) (*Provider, error) {
+	mode := strings.ToLower(strings.TrimSpace(proxy.Mode))
+	if mode == "" {
+		mode = ProxyModeDisabled
 	}
 
-	return newProvider(client, defaultBatchSize, defaultRequestDelay), nil
+	provider := &Provider{
+		batchSize:       defaultBatchSize,
+		requestDelay:    defaultRequestDelay,
+		proxyMode:       mode,
+		proxyListClient: &stdhttp.Client{Timeout: defaultTimeout},
+		clientFactory:   newTLSClient,
+	}
+
+	switch mode {
+	case ProxyModeDisabled:
+		client, errClient := provider.clientFactory("")
+		if errClient != nil {
+			return nil, fmt.Errorf("create Yahoo direct TLS client: %w", errClient)
+		}
+		provider.client = client
+
+	case ProxyModeSingle:
+		proxyURL := strings.TrimSpace(proxy.URL)
+		parsed, errParse := url.Parse(proxyURL)
+		if errParse != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return nil, fmt.Errorf("Yahoo single proxy URL is invalid")
+		}
+
+		client, errClient := provider.clientFactory(proxyURL)
+		if errClient != nil {
+			return nil, fmt.Errorf("create Yahoo proxied TLS client")
+		}
+		provider.client = client
+
+	case ProxyModeList:
+		listURL := strings.TrimSpace(proxy.ListURL)
+		parsed, errParse := url.Parse(listURL)
+		if errParse != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return nil, fmt.Errorf("Yahoo proxy list URL is invalid")
+		}
+		provider.proxyListURL = listURL
+
+	default:
+		return nil, fmt.Errorf("Yahoo proxy mode %q is invalid", mode)
+	}
+
+	return provider, nil
 }
 
 func newProvider(client httpClient, batchSize int, requestDelay time.Duration) *Provider {
@@ -125,7 +165,13 @@ func newProvider(client httpClient, batchSize int, requestDelay time.Duration) *
 		batchSize = defaultBatchSize
 	}
 
-	return &Provider{client: client, batchSize: batchSize, requestDelay: requestDelay}
+	return &Provider{
+		client:        client,
+		batchSize:     batchSize,
+		requestDelay:  requestDelay,
+		proxyMode:     ProxyModeDisabled,
+		clientFactory: newTLSClient,
+	}
 }
 
 func (p *Provider) Close() {

@@ -23,8 +23,52 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ManagementCompany.FundURL != defaultManagementCompanyFundURL {
 		t.Fatalf("management company fund URL = %q, want default", cfg.ManagementCompany.FundURL)
 	}
+	if cfg.Yahoo.ProxyMode != "disabled" || cfg.Yahoo.ProxyURL != "" || cfg.Yahoo.ProxyListURL != "" {
+		t.Fatalf("Yahoo = %#v, want disabled proxy defaults", cfg.Yahoo)
+	}
 	if cfg.DB.SSLMode != "disable" {
 		t.Fatalf("DB sslmode = %q, want disable", cfg.DB.SSLMode)
+	}
+}
+
+func TestLoadYahooProxyModes(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		mode     string
+		proxyURL string
+		listURL  string
+		wantMode string
+		wantErr  bool
+	}{
+		{name: "disabled", mode: "disabled", wantMode: "disabled"},
+		{name: "single HTTP", mode: "single", proxyURL: "http://user:password@example.com:3128", wantMode: "single"},
+		{name: "single SOCKS5", mode: "single", proxyURL: "socks5://example.com:1080", wantMode: "single"},
+		{name: "list", mode: "list", listURL: "https://proxy.example.com/list", wantMode: "list"},
+		{name: "single missing URL", mode: "single", wantErr: true},
+		{name: "list invalid URL", mode: "list", listURL: "socks5://example.com/list", wantErr: true},
+		{name: "unknown", mode: "random", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("YAHOO_PROXY_MODE", test.mode)
+			t.Setenv("YAHOO_PROXY_URL", test.proxyURL)
+			t.Setenv("YAHOO_PROXY_LIST_URL", test.listURL)
+
+			cfg, err := Load()
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("Load() error = nil, want error")
+				}
+
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Yahoo.ProxyMode != test.wantMode || cfg.Yahoo.ProxyURL != test.proxyURL || cfg.Yahoo.ProxyListURL != test.listURL {
+				t.Fatalf("Yahoo = %#v", cfg.Yahoo)
+			}
+		})
 	}
 }
 
@@ -121,4 +165,7 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("FPR_ADMIN_LOGIN", "admin")
 	t.Setenv("FPR_ADMIN_PASSWORD_HASH", testAdminPasswordHash)
 	t.Setenv("MANAGEMENT_COMPANY_FUND_URL", "")
+	t.Setenv("YAHOO_PROXY_MODE", "")
+	t.Setenv("YAHOO_PROXY_URL", "")
+	t.Setenv("YAHOO_PROXY_LIST_URL", "")
 }

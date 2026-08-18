@@ -51,6 +51,20 @@ type chartQuote struct {
 }
 
 func (p *Provider) FetchDailyPrices(ctx context.Context, symbols []string, till time.Time) (prices.HistoricalSourceResult, error) {
+	if len(symbols) == 0 {
+		return prices.HistoricalSourceResult{PricesBySymbol: map[string]prices.SourceDailyPrice{}}, nil
+	}
+
+	run, closeRun, errRun := p.runProvider(ctx)
+	if errRun != nil {
+		return prices.HistoricalSourceResult{}, errRun
+	}
+	defer closeRun()
+
+	return run.fetchDailyPrices(ctx, symbols, till)
+}
+
+func (p *Provider) fetchDailyPrices(ctx context.Context, symbols []string, till time.Time) (prices.HistoricalSourceResult, error) {
 	result := prices.HistoricalSourceResult{
 		RequestedSymbols: len(symbols),
 		PricesBySymbol:   make(map[string]prices.SourceDailyPrice, len(symbols)),

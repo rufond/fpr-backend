@@ -22,6 +22,20 @@ type searchQuote struct {
 }
 
 func (p *Provider) ResolveSymbols(ctx context.Context, isins []string) (prices.YahooSymbolResolutionResult, error) {
+	if len(isins) == 0 {
+		return prices.YahooSymbolResolutionResult{SymbolsByISIN: map[string]string{}}, nil
+	}
+
+	run, closeRun, errRun := p.runProvider(ctx)
+	if errRun != nil {
+		return prices.YahooSymbolResolutionResult{}, errRun
+	}
+	defer closeRun()
+
+	return run.resolveSymbols(ctx, isins)
+}
+
+func (p *Provider) resolveSymbols(ctx context.Context, isins []string) (prices.YahooSymbolResolutionResult, error) {
 	result := prices.YahooSymbolResolutionResult{
 		RequestedISINs: len(isins),
 		SymbolsByISIN:  make(map[string]string, len(isins)),

@@ -10,7 +10,17 @@ import (
 var _ prices.YahooSource = (*Provider)(nil)
 
 func (p *Provider) FetchPrices(ctx context.Context, symbols []string) (prices.YahooSourceResult, error) {
-	fetched, err := p.fetch(ctx, symbols)
+	if len(symbols) == 0 {
+		return prices.YahooSourceResult{QuotesByRequest: map[string]prices.YahooSourceQuote{}}, nil
+	}
+
+	run, closeRun, errRun := p.runProvider(ctx)
+	if errRun != nil {
+		return prices.YahooSourceResult{}, errRun
+	}
+	defer closeRun()
+
+	fetched, err := run.fetch(ctx, symbols)
 	if err != nil {
 		return prices.YahooSourceResult{}, err
 	}

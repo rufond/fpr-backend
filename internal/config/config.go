@@ -18,6 +18,7 @@ type Config struct {
 	DB                DBConfig
 	Admin             AdminConfig
 	ManagementCompany ManagementCompanyConfig
+	Yahoo             YahooConfig
 }
 
 type HTTPConfig struct {
@@ -43,6 +44,12 @@ type AdminConfig struct {
 
 type ManagementCompanyConfig struct {
 	FundURL string
+}
+
+type YahooConfig struct {
+	ProxyMode    string
+	ProxyURL     string
+	ProxyListURL string
 }
 
 func Load() (*Config, error) {
@@ -83,13 +90,55 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("MANAGEMENT_COMPANY_FUND_URL must be an absolute http(s) URL")
 	}
 
+	yahoo, errYahoo := loadYahooConfig()
+	if errYahoo != nil {
+		return nil, errYahoo
+	}
+
 	return &Config{
 		Debug:             os.Getenv("DEBUG") == "true",
 		HTTP:              HTTPConfig{Addr: httpAddr},
 		DB:                db,
 		Admin:             admin,
 		ManagementCompany: ManagementCompanyConfig{FundURL: managementCompanyFundURL},
+		Yahoo:             yahoo,
 	}, nil
+}
+
+func loadYahooConfig() (YahooConfig, error) {
+	cfg := YahooConfig{
+		ProxyMode:    strings.ToLower(strings.TrimSpace(os.Getenv("YAHOO_PROXY_MODE"))),
+		ProxyURL:     strings.TrimSpace(os.Getenv("YAHOO_PROXY_URL")),
+		ProxyListURL: strings.TrimSpace(os.Getenv("YAHOO_PROXY_LIST_URL")),
+	}
+
+	if cfg.ProxyMode == "" {
+		cfg.ProxyMode = "disabled"
+	}
+
+	switch cfg.ProxyMode {
+	case "disabled":
+		return cfg, nil
+
+	case "single":
+		parsed, errParse := url.Parse(cfg.ProxyURL)
+		if errParse != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return YahooConfig{}, fmt.Errorf("YAHOO_PROXY_URL must be an absolute proxy URL in single mode")
+		}
+
+		return cfg, nil
+
+	case "list":
+		parsed, errParse := url.Parse(cfg.ProxyListURL)
+		if errParse != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return YahooConfig{}, fmt.Errorf("YAHOO_PROXY_LIST_URL must be an absolute http(s) URL in list mode")
+		}
+
+		return cfg, nil
+
+	default:
+		return YahooConfig{}, fmt.Errorf("YAHOO_PROXY_MODE must be one of disabled, single, list")
+	}
 }
 
 func loadDBConfig() (DBConfig, error) {

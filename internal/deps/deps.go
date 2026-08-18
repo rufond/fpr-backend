@@ -34,7 +34,11 @@ func New(ctx context.Context, cfg *config.Config) (*Deps, error) {
 		return nil, err
 	}
 
-	yahooProvider, errYahoo := yahoo.NewProvider()
+	yahooProvider, errYahoo := yahoo.NewProvider(yahoo.ProxyConfig{
+		Mode:    cfg.Yahoo.ProxyMode,
+		URL:     cfg.Yahoo.ProxyURL,
+		ListURL: cfg.Yahoo.ProxyListURL,
+	})
 	if errYahoo != nil {
 		db.Close()
 		return nil, errYahoo
