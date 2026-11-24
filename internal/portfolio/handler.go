@@ -107,7 +107,7 @@ func (h *Handler) Entry(isin, name, asOf string) (IPO, bool) {
 }
 
 func (h *Handler) Index(_ routes.Request) (int, error, any) {
-	return http.StatusOK, nil, h.archive.Load().Index()
+	return http.StatusOK, nil, h.archive.Load().Index(h.state.Load(), h.officialURL)
 }
 
 func (h *Handler) Closed(_ routes.Request) (int, error, any) {

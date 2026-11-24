@@ -87,8 +87,15 @@ type Snapshot struct {
 }
 
 type Index struct {
-	Reports          []ReportSummary    `json:"reports"`
-	LatestValuations map[string]Holding `json:"latest_valuations"`
+	Reports          []ReportSummary          `json:"reports"`
+	LatestValuations map[string]Holding       `json:"latest_valuations"`
+	PositionStarts   map[string]PositionStart `json:"position_starts"`
+}
+
+type PositionStart struct {
+	FirstSeen      string `json:"first_seen"`
+	PreviousAbsent string `json:"previous_absent,omitempty"`
+	SourceURL      string `json:"source_url"`
 }
 
 type Detail struct {
@@ -145,16 +152,32 @@ func NewArchive(reports []Report, ipos []IPO) *Archive {
 	return a
 }
 
-func (a *Archive) Index() Index {
+func (a *Archive) Index(state *appstate.State, officialURL string) Index {
 	result := Index{
 		Reports:          slices.Clone(a.summaries),
 		LatestValuations: map[string]Holding{},
+		PositionStarts:   map[string]PositionStart{},
 	}
 	// Find the latest documented valuation for each instrument. The reporting
 	// date travels with the value, including for instruments absent since then.
 	for isin, series := range a.observations {
 		last := series[len(series)-1]
 		result.LatestValuations[isin] = a.holding(last)
+	}
+
+	var previous positionSnapshot
+	for _, snapshot := range a.positionSnapshots(state, officialURL) {
+		for isin := range snapshot.positions {
+			if _, held := previous.positions[isin]; held {
+				continue
+			}
+			result.PositionStarts[isin] = PositionStart{
+				FirstSeen:      snapshot.date,
+				PreviousAbsent: previous.date,
+				SourceURL:      snapshot.source,
+			}
+		}
+		previous = snapshot
 	}
 
 	return result
@@ -243,13 +266,27 @@ func (a *Archive) Changes(state *appstate.State, officialURL string) []Change {
 		return slices.Clone(a.changes)
 	}
 
-	snapshots := make([]positionSnapshot, 0, len(a.reports)+len(state.Fund.CompositionHistory))
+	snapshots := a.positionSnapshots(state, officialURL)
+	var changes []Change
+	for i := 1; i < len(snapshots); i++ {
+		changes = append(changes, compare(snapshots[i-1], snapshots[i])...)
+	}
+
+	return changes
+}
+
+func (a *Archive) positionSnapshots(state *appstate.State, officialURL string) []positionSnapshot {
+	var history []appstate.FundComposition
+	if state != nil && state.Fund != nil {
+		history = state.Fund.CompositionHistory
+	}
+	snapshots := make([]positionSnapshot, 0, len(a.reports)+len(history))
 	dates := make(map[string]struct{}, len(a.reports))
 	for _, report := range a.reports {
 		dates[report.AsOfDate] = struct{}{}
 		snapshots = append(snapshots, positionsOf(report))
 	}
-	for _, snapshot := range state.Fund.CompositionHistory {
+	for _, snapshot := range history {
 		date := snapshot.AsOfDate.Format(time.DateOnly)
 		if _, exists := dates[date]; exists {
 			continue
@@ -272,12 +309,7 @@ func (a *Archive) Changes(state *appstate.State, officialURL string) []Change {
 
 	slices.SortFunc(snapshots, func(left, right positionSnapshot) int { return strings.Compare(left.date, right.date) })
 
-	var changes []Change
-	for i := 1; i < len(snapshots); i++ {
-		changes = append(changes, compare(snapshots[i-1], snapshots[i])...)
-	}
-
-	return changes
+	return snapshots
 }
 
 func (a *Archive) Closed(state *appstate.State, officialURL string) []ClosedPosition {

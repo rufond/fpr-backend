@@ -13,6 +13,8 @@ func TestArchiveUsesDisclosureIntervalsAndRestartsComparisonAfterReentry(t *test
 
 	const isin = "US22266M1045"
 	const other = "US22266T1097"
+	const websiteOnly = "US3563901046"
+	const website = "https://example.test/official"
 	holding := Position{ISIN: isin, Name: "Coursera Inc.", Kind: "equity", Quantity: "10", Value: "100"}
 	control := Position{ISIN: other, Name: "Coupang Inc.", Kind: "equity", Quantity: "4", Value: "40"}
 	report := func(date, currency string, positions ...Position) Report {
@@ -33,9 +35,12 @@ func TestArchiveUsesDisclosureIntervalsAndRestartsComparisonAfterReentry(t *test
 		report("2024-05-01", "RUB", holding, control),
 	}, nil)
 	state := &appstate.State{Fund: &appstate.FundState{CompositionHistory: []appstate.FundComposition{
-		{AsOfDate: time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), Holdings: []appstate.FundHolding{{ISIN: other, Name: control.Name, Kind: control.Kind, Quantity: control.Quantity}}},
+		{AsOfDate: time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), Holdings: []appstate.FundHolding{
+			{ISIN: other, Name: control.Name, Kind: control.Kind, Quantity: control.Quantity},
+			{ISIN: websiteOnly, Name: "Freedom Holding", Kind: "equity", Quantity: "2"},
+		}},
 	}}}
-	results := a.Detail(isin, state, "https://example.test/official")
+	results := a.Detail(isin, state, website)
 	if len(results.Changes) != 4 {
 		t.Fatalf("changes = %#v", results.Changes)
 	}
@@ -43,8 +48,18 @@ func TestArchiveUsesDisclosureIntervalsAndRestartsComparisonAfterReentry(t *test
 	if removed.Type != "removed" || removed.FromDate != "2023-11-01" || removed.ToDate != "2024-02-01" || removed.Before != "12" {
 		t.Fatalf("removal interval = %#v", removed)
 	}
-	if detached := results.Changes[3]; detached.ToSource != "https://example.test/official" || detached.ToDate != "2024-06-01" {
+	if detached := results.Changes[3]; detached.ToSource != website || detached.ToDate != "2024-06-01" {
 		t.Fatalf("daily disclosure change = %#v", detached)
+	}
+	starts := a.Index(state, website).PositionStarts
+	if got := starts[isin]; got != (PositionStart{"2024-04-01", "2024-02-01", "https://example.test/2024-04-01"}) {
+		t.Errorf("position start after re-entry = %#v", got)
+	}
+	if got := starts[other]; got != (PositionStart{"2023-10-01", "", "https://example.test/2023-10-01"}) {
+		t.Errorf("position start from the earliest report = %#v", got)
+	}
+	if got := starts[websiteOnly]; got != (PositionStart{"2024-06-01", "2024-05-01", website}) {
+		t.Errorf("position start from the fund website = %#v", got)
 	}
 	for _, d := range []string{"2024-04-01", "2024-05-01"} {
 		snapshot, ok := a.Snapshot(d)
