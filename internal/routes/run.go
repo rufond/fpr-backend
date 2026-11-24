@@ -14,11 +14,14 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const maxRequestBodyBytes = 16 << 10
+
 type Route struct {
-	Method       string
-	Path         string
-	AuthRequired bool
-	Handler      func(request Request) (int, error, any)
+	Method          string
+	Path            string
+	AuthRequired    bool
+	MaxRawBodyBytes int64
+	Handler         func(request Request) (int, error, any)
 }
 
 type HTTPRoute struct {
@@ -36,6 +39,7 @@ type UserResolver func(token string) *User
 
 type Request struct {
 	Body      map[string]any
+	RawBody   []byte
 	Method    string
 	Context   context.Context
 	IP        string
@@ -109,17 +113,26 @@ func NewHandler(routes []Route, httpRoutes []HTTPRoute, resolveUser UserResolver
 				status = http.StatusUnauthorized
 				content = map[string]any{"error": http.StatusText(http.StatusUnauthorized)}
 			} else {
-				bodyBytes, errReadBody := io.ReadAll(request.Body)
-				if errReadBody != nil {
-					status, errHandler = http.StatusBadRequest, errReadBody
+				limit := int64(maxRequestBodyBytes)
+				if route.MaxRawBodyBytes > 0 {
+					limit = route.MaxRawBodyBytes
 				}
 
-				if len(bodyBytes) == 0 {
-					bodyBytes = []byte("{}")
+				bodyBytes, errReadBody := io.ReadAll(http.MaxBytesReader(writer, request.Body, limit))
+				if errReadBody != nil {
+					status, errHandler = http.StatusBadRequest, errReadBody
+					if _, ok := errors.AsType[*http.MaxBytesError](errReadBody); ok {
+						status = http.StatusRequestEntityTooLarge
+						content = map[string]string{"error": http.StatusText(status)}
+					}
 				}
 
 				if errHandler == nil {
-					if errUnmarshal := json.Unmarshal(bodyBytes, &req.Body); errUnmarshal != nil {
+					if route.MaxRawBodyBytes > 0 {
+						req.RawBody = bodyBytes
+					} else if len(bodyBytes) == 0 {
+						req.Body = map[string]any{}
+					} else if errUnmarshal := json.Unmarshal(bodyBytes, &req.Body); errUnmarshal != nil {
 						status, errHandler = http.StatusBadRequest, errUnmarshal
 					}
 				}

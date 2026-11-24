@@ -12,7 +12,11 @@ import (
 	"github.com/rufond/fpr-backend/internal/diagnostics"
 	"github.com/rufond/fpr-backend/internal/fund"
 	"github.com/rufond/fpr-backend/internal/fx"
+	"github.com/rufond/fpr-backend/internal/portfolio"
 	"github.com/rufond/fpr-backend/internal/prices"
+	"github.com/rufond/fpr-backend/internal/providers/kase"
+	"github.com/rufond/fpr-backend/internal/providers/nasdaq"
+	"github.com/rufond/fpr-backend/internal/providers/nbk"
 	"github.com/rufond/fpr-backend/internal/realtime"
 	"github.com/rufond/fpr-backend/internal/routes"
 	"github.com/rufond/fpr-backend/internal/scheduler"
@@ -31,6 +35,7 @@ type App struct {
 	realtime    *realtime.Hub
 	scheduler   *scheduler.Module
 	valuation   *valuation.Module
+	portfolio   *portfolio.Handler
 }
 
 func New(d *deps.Deps) *App {
@@ -63,6 +68,13 @@ func New(d *deps.Deps) *App {
 		"* * * * *",
 		schedulerjobs.MOEXUSDRUBSync(fxModule.Service, valuationModule.Service, realtimeHub),
 	)
+	nbkProvider := nbk.NewProvider()
+	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobNBKUSDKZTSync, "NBK USD/KZT sync", "*/15 * * * *",
+		schedulerjobs.FXRateSync("NBK", func(ctx context.Context) (*fx.SyncResult, error) {
+			return fxModule.Service.SyncRate(ctx, nbkProvider.FetchUSDKZT)
+		}, valuationModule.Service, realtimeHub),
+	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobMOEXSourcesDiscovery,
 		"MOEX source discovery",
@@ -81,6 +93,23 @@ func New(d *deps.Deps) *App {
 		"* * * * *",
 		schedulerjobs.MOEXSecurityPricesSync(priceModule.Service, valuationModule.Service, realtimeHub),
 	)
+	kaseProvider := kase.NewProvider()
+	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobKASESecurityPricesSync,
+		"KASE share prices sync",
+		"*/5 * * * *",
+		schedulerjobs.SecurityPricesSync("KASE", func(ctx context.Context) (*prices.MOEXSecuritySyncResult, error) {
+			return priceModule.Service.SyncSecurityPrices(ctx, prices.ProviderKASE, kaseProvider.FetchSecurityPrices)
+		}, valuationModule.Service, realtimeHub),
+	)
+	nasdaqProvider := nasdaq.NewProvider()
+	priceModule.Service.SetNasdaqHistoricalSource(nasdaqProvider.FetchDailyPrices)
+	schedulerModule.Manager.MustAdd(
+		schedulerjobs.JobNasdaqSecurityPricesSync, "Nasdaq share prices sync", "*/5 * * * *",
+		schedulerjobs.SecurityPricesSync("Nasdaq", func(ctx context.Context) (*prices.MOEXSecuritySyncResult, error) {
+			return priceModule.Service.SyncSecurityPrices(ctx, prices.ProviderNasdaq, nasdaqProvider.FetchSecurityPrices)
+		}, valuationModule.Service, realtimeHub),
+	)
 	schedulerModule.Manager.MustAdd(
 		schedulerjobs.JobYahooPricesSync,
 		"Yahoo prices sync",
@@ -94,9 +123,19 @@ func New(d *deps.Deps) *App {
 		schedulerjobs.MOEXFundUnitHistorySync(priceModule.Service, realtimeHub),
 	)
 
+	portfolioHandler := portfolio.NewHandler(d.DB, stateManager, realtimeHub, d.Config.ManagementCompany.FundURL)
+	fundModule.Service.SetEntryPriceLookup(func(isin, name, asOf string) fund.EntryPrice {
+		entry, ok := portfolioHandler.Entry(isin, name, asOf)
+		if !ok {
+			return fund.EntryPrice{}
+		}
+		return fund.EntryPrice{USD: entry.EntryPriceUSD, Approximate: entry.Approximate}
+	})
+
 	return &App{
 		UserResolver: authModule.Service.ResolveUser,
 		auth:         authModule,
+		portfolio:    portfolioHandler,
 		diagnostics:  diagnosticsModule,
 		fund:         fundModule,
 		fx:           fxModule,
@@ -108,6 +147,9 @@ func New(d *deps.Deps) *App {
 }
 
 func (a *App) Start(ctx context.Context) error {
+	if err := a.portfolio.Start(ctx); err != nil {
+		return err
+	}
 	if err := a.fund.Start(ctx); err != nil {
 		return err
 	}
@@ -172,6 +214,43 @@ func (a *App) Routes() []routes.Route {
 			Method:  http.MethodPost,
 			Path:    "/api/v1/fund/market-history",
 			Handler: a.fund.Handler.MarketHistory,
+		},
+		{
+			Method:  http.MethodGet,
+			Path:    "/api/v1/portfolio",
+			Handler: a.portfolio.Index,
+		},
+		{
+			Method:  http.MethodGet,
+			Path:    "/api/v1/portfolio/closed",
+			Handler: a.portfolio.Closed,
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/api/v1/portfolio/snapshot",
+			Handler: a.portfolio.Snapshot,
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/api/v1/portfolio/changes",
+			Handler: a.portfolio.Changes,
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/api/v1/portfolio/instrument",
+			Handler: a.portfolio.Detail,
+		},
+		{
+			Method:  http.MethodGet,
+			Path:    "/api/v1/portfolio/ipo",
+			Handler: a.portfolio.IPOs,
+		},
+		{
+			Method:          http.MethodPost,
+			Path:            "/api/v1/admin/portfolio/import",
+			AuthRequired:    true,
+			MaxRawBodyBytes: portfolio.MaxImportBytes,
+			Handler:         a.portfolio.Import,
 		},
 		{
 			Method:       http.MethodGet,

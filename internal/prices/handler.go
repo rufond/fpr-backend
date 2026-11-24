@@ -76,15 +76,7 @@ func (h *Handler) SetSource(request routes.Request) (int, error, any) {
 	input.ProviderSymbol = strings.ToUpper(strings.TrimSpace(input.ProviderSymbol))
 
 	switch input.Provider {
-	case ProviderMOEX, ProviderYahoo:
-	case ProviderKASE:
-		if input.Enabled {
-			return http.StatusUnprocessableEntity, nil, map[string]any{
-				"errors": map[string]string{
-					"enabled": ErrPriceProviderNotImplemented.Error(),
-				},
-			}
-		}
+	case ProviderMOEX, ProviderYahoo, ProviderKASE, ProviderNasdaq:
 	default:
 		return http.StatusUnprocessableEntity, nil, map[string]any{
 			"errors": map[string]string{
@@ -101,6 +93,10 @@ func (h *Handler) SetSource(request routes.Request) (int, error, any) {
 					"instrument_id": err.Error(),
 				},
 			}
+		}
+
+		if errors.Is(err, ErrPriceProviderNotImplemented) {
+			return http.StatusUnprocessableEntity, nil, map[string]any{"errors": map[string]string{"enabled": "Источник поддерживает только акции и расписки"}}
 		}
 
 		return http.StatusInternalServerError, err, nil

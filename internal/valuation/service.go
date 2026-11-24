@@ -181,7 +181,9 @@ func (s *Service) prepareBaselines(ctx context.Context, state *appstate.State, e
 	pricesByInstrument := make(map[int64]appstate.InstrumentPrice)
 	if state.Prices != nil {
 		for _, price := range state.Prices.Sources {
-			pricesByInstrument[price.InstrumentID] = price
+			if price.ImportedProvider == "" {
+				pricesByInstrument[price.InstrumentID] = price
+			}
 		}
 	}
 
@@ -289,20 +291,18 @@ func (s *Service) prepareBaselines(ctx context.Context, state *appstate.State, e
 		marketValue.Mul(marketValue, fxValue)
 
 		result = append(result, preparedBaseline{
-			InstrumentID: *asset.InstrumentID,
-			baseline: baseline{
-				AssetID:        asset.ID,
-				PriceSourceID:  priceSource.PriceSourceID,
-				Provider:       priceSource.Provider,
-				ProviderSymbol: priceSource.ProviderSymbol,
-				UnitValue:      historicalPrice.UnitValue,
-				Currency:       historicalPrice.Currency,
-				PricedAt:       historicalPrice.PricedAt,
-				FXRateToUSD:    fxRate,
-				FXProvider:     fxProvider,
-				FXPricedAt:     fxPricedAt,
-				MarketValueUSD: decimalValue(marketValue),
-			},
+			InstrumentID:   *asset.InstrumentID,
+			AssetID:        asset.ID,
+			PriceSourceID:  priceSource.PriceSourceID,
+			Provider:       priceSource.Provider,
+			ProviderSymbol: priceSource.ProviderSymbol,
+			UnitValue:      historicalPrice.UnitValue,
+			Currency:       historicalPrice.Currency,
+			PricedAt:       historicalPrice.PricedAt,
+			FXRateToUSD:    fxRate,
+			FXProvider:     fxProvider,
+			FXPricedAt:     fxPricedAt,
+			MarketValueUSD: decimalValue(marketValue),
 		})
 	}
 
@@ -495,7 +495,7 @@ func calculateLiveValuation(state *appstate.State, baselines map[int64]appstate.
 		}
 
 		price, exists := currentPrices[baselineItem.PriceSourceID]
-		if !exists || price.Provider != baselineItem.Provider || price.ProviderSymbol != baselineItem.ProviderSymbol {
+		if !exists || price.ImportedProvider != "" || price.Provider != baselineItem.Provider || price.ProviderSymbol != baselineItem.ProviderSymbol {
 			continue
 		}
 
@@ -529,6 +529,8 @@ func calculateLiveValuation(state *appstate.State, baselines map[int64]appstate.
 	}
 
 	estimatedNAV := new(big.Rat).Add(new(big.Rat).Set(officialNAV), liveDelta)
+	liveDeltaPercent := new(big.Rat).Quo(liveDelta, officialNAV)
+	liveDeltaPercent.Mul(liveDeltaPercent, big.NewRat(100, 1))
 	estimatedUnitValue := new(big.Rat).Mul(officialUnitValue, estimatedNAV)
 	estimatedUnitValue.Quo(estimatedUnitValue, officialNAV)
 
@@ -549,12 +551,13 @@ func calculateLiveValuation(state *appstate.State, baselines map[int64]appstate.
 		EstimatedCalculatedUnitValueRUB: estimatedUnitValueRUB,
 		PremiumDiscountPercent:          premiumDiscount,
 		LiveDeltaUSD:                    decimalValue(liveDelta),
+		LiveDeltaPercent:                decimalValue(liveDeltaPercent),
 		LiveCoveragePercent:             decimalValue(coveredShare),
 	}, nil
 }
 
 func calculateMarketComparison(state *appstate.State, estimatedUnitValueUSD *big.Rat) (string, string, error) {
-	if state.FX == nil || state.Prices == nil {
+	if state.FX == nil {
 		return "", "", nil
 	}
 
@@ -571,6 +574,10 @@ func calculateMarketComparison(state *appstate.State, estimatedUnitValueUSD *big
 	estimatedUnitValueRUB := new(big.Rat).Mul(estimatedUnitValueUSD, usdRUBValue)
 	if estimatedUnitValueRUB.Sign() <= 0 {
 		return "", "", fmt.Errorf("calculate live fund unit RUB value: estimated unit value is invalid")
+	}
+
+	if state.Prices == nil {
+		return decimalValue(estimatedUnitValueRUB), "", nil
 	}
 
 	for _, price := range state.Prices.Sources {
@@ -590,7 +597,7 @@ func calculateMarketComparison(state *appstate.State, estimatedUnitValueUSD *big
 		return decimalValue(estimatedUnitValueRUB), decimalValue(premiumDiscount), nil
 	}
 
-	return "", "", nil
+	return decimalValue(estimatedUnitValueRUB), "", nil
 }
 
 func currentFXRateToUSD(state *appstate.FXState, fromCurrency string) (string, bool, error) {

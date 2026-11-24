@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rufond/fpr-backend/internal/appstate"
+	"github.com/rufond/fpr-backend/internal/prices"
 )
 
 func TestServiceStateBuildsCurrentReadModelFromRAM(t *testing.T) {
@@ -44,8 +45,19 @@ func TestServiceStateBuildsCurrentReadModelFromRAM(t *testing.T) {
 	if result.Market.UnitPrice.InstrumentID != 99 || result.Market.UnitPrice.UnitValue != "3210.5" || result.Market.UnitPrice.Currency != "RUB" {
 		t.Fatalf("market unit price = %#v", result.Market.UnitPrice)
 	}
+	quote, exists := result.Market.AssetPrices[instrumentID]
+	if len(result.Market.AssetPrices) != 1 || !exists || quote.UnitValue != "30000" || quote.Currency != "KZT" || quote.Provider != "yahoo" {
+		t.Fatalf("asset prices = %#v", result.Market.AssetPrices)
+	}
+	if result.OfficialSnapshot.UnitCount == nil || result.OfficialSnapshot.UnitCount.AsOfDate != "2026-07-31" ||
+		result.OfficialSnapshot.UnitCount.UnitsOutstanding != "15700000" {
+		t.Fatalf("unit count = %#v", result.OfficialSnapshot.UnitCount)
+	}
 	if result.Market.USDRUB == nil || result.Market.USDRUB.Rate != "79.125" {
 		t.Fatalf("USD/RUB = %#v", result.Market.USDRUB)
+	}
+	if result.Market.UnitPriceUSD != "40.57503949" {
+		t.Fatalf("market unit price in USD = %q", result.Market.UnitPriceUSD)
 	}
 }
 
@@ -215,6 +227,11 @@ func testStateManager(t *testing.T, instrumentID int64) *appstate.Manager {
 				SourceHash:             "ignored-by-public-api",
 				CalculatedUnitValueUSD: "31.18",
 				NAVUSD:                 "492986650.00",
+				UnitCount: &appstate.FundUnitCount{
+					AsOfDate:         time.Date(2026, time.July, 31, 0, 0, 0, 0, time.UTC),
+					UnitsOutstanding: "15700000",
+					SourceURL:        "https://example.test/report.pdf",
+				},
 				Assets: []appstate.FundAsset{
 					{
 						ID:                   1,
@@ -275,6 +292,20 @@ func testStateManager(t *testing.T, instrumentID int64) *appstate.Manager {
 		},
 		Prices: &appstate.PriceState{
 			Sources: map[int64]appstate.InstrumentPrice{
+				102: {
+					PriceSourceID: 102,
+					InstrumentID:  instrumentID,
+					Provider:      "yahoo",
+					UnitValue:     "30000",
+					Currency:      "KZT",
+				},
+				103: {
+					PriceSourceID: 103,
+					InstrumentID:  instrumentID + 1,
+					Provider:      "moex",
+					UnitValue:     "160",
+					Currency:      "RUB",
+				},
 				101: {
 					PriceSourceID:  101,
 					InstrumentID:   99,
@@ -402,5 +433,102 @@ func TestServiceStateHidesLiveValuationForPreviousSnapshot(t *testing.T) {
 	}
 	if result.Market.LiveValuation != nil {
 		t.Fatalf("LiveValuation = %#v, want nil", result.Market.LiveValuation)
+	}
+}
+
+func TestInstrumentMarketHistoryUsesOnlyCurrentSourceAndSelectedWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
+	isin := "KZ1C00001122"
+	price := func(amount, currency string, before time.Duration) appstate.InstrumentPricePoint {
+		return appstate.InstrumentPricePoint{UnitValue: amount, Currency: currency, PricedAt: now.Add(-before)}
+	}
+	manager := appstate.NewManager()
+	err := manager.Initialize(&appstate.State{
+		Fund: &appstate.FundState{},
+		Prices: &appstate.PriceState{
+			Sources: map[int64]appstate.InstrumentPrice{2: {ISIN: isin, Provider: "kase"}},
+			Points: map[int64]appstate.InstrumentPricePointSeries{
+				1: {ISIN: isin, Provider: "yahoo", Items: []appstate.InstrumentPricePoint{price("917", "USD", time.Hour)}},
+				2: {ISIN: isin, Provider: "kase", Items: []appstate.InstrumentPricePoint{
+					price("10200", "KZT", 0),
+					price("8000", "KZT", 25*time.Hour),
+					price("10000", "KZT", 24*time.Hour),
+					price("10250", "KZT", 0),
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := NewService(nil, nil, manager).InstrumentMarketHistory(isin, new(now.Add(-24*time.Hour)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.UnitPrices) != 2 || len(result.LiveValues) != 0 ||
+		result.UnitChange != "250.00000000" || result.UnitChangePercent != "2.500000" {
+		t.Fatalf("instrument history = %#v", result)
+	}
+}
+
+func TestStateUsesWebsiteCheckpointsForShareChange(t *testing.T) {
+	current := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	previous := current.AddDate(0, 0, -5)
+	snapshot := &appstate.FundState{
+		Snapshot: appstate.FundSnapshot{
+			AsOfDate: current, NAVUSD: "1000000",
+			Assets: []appstate.FundAsset{
+				{ISIN: "KZ1C00001122", Quantity: "2000", AssetSharePercent: "8.4"},
+				{ISIN: "US3563901046", Quantity: "1000", AssetSharePercent: "0.01", AssetShareUpperBound: true},
+			},
+		},
+		CompositionHistory: []appstate.FundComposition{
+			{AsOfDate: previous, Holdings: []appstate.FundHolding{
+				{ISIN: "KZ1C00001122", AssetSharePercent: "7.25", Rows: 1},
+				{ISIN: "US3563901046", AssetSharePercent: "0.1", Rows: 1},
+			}},
+			{AsOfDate: current, Holdings: []appstate.FundHolding{
+				{ISIN: "KZ1C00001122", AssetSharePercent: "8.4", Rows: 1},
+			}},
+		},
+	}
+	result := buildStateResult(&appstate.State{Fund: snapshot}, current, nil)
+	asset := result.OfficialSnapshot.Assets[0]
+	if asset.DisclosureUnitEstimateUSD != "42.00000000" || asset.ShareChangePP != "1.1500" || asset.PreviousShareDate != "2026-08-26" {
+		t.Fatalf("unexpected asset %#v", asset)
+	}
+	bounded := result.OfficialSnapshot.Assets[1]
+	if bounded.DisclosureUnitEstimateUSD != "" || bounded.ShareChangePP != "" {
+		t.Fatalf("rounded upper bound treated as exact: %#v", bounded)
+	}
+}
+
+func TestStateMarketPriceOmitsPriorSessionDayChange(t *testing.T) {
+	// 20:00 UTC is still the same trading date on the Moscow Exchange at 20:50 UTC.
+	quote := appstate.InstrumentPrice{Provider: prices.ProviderMOEX, UnitValue: "103", PreviousClose: "100", PricedAt: time.Date(2026, 8, 31, 20, 0, 0, 0, time.UTC)}
+	daily := appstate.InstrumentDailyPriceSeries{}
+	if result := stateMarketPrice(quote, daily, "2", quote.PricedAt.Add(50*time.Minute)); result.DayChange == nil || result.DayChange.Total != "6.00000000" {
+		t.Fatalf("current trading day change = %#v", result.DayChange)
+	}
+	if result := stateMarketPrice(quote, daily, "2", quote.PricedAt.Add(time.Hour)); result.DayChange != nil {
+		t.Fatalf("prior trading day change = %#v", result.DayChange)
+	}
+}
+
+func TestStateMarketPriceShowsImportedQuoteProvider(t *testing.T) {
+	pricedAt := time.Date(2026, 9, 1, 20, 0, 1, 0, time.UTC)
+	quote := appstate.InstrumentPrice{
+		Provider:         prices.ProviderNasdaq,
+		ImportedProvider: prices.ProviderYahoo,
+		ProviderSymbol:   "FRHC",
+		UnitValue:        "171.87",
+		PreviousClose:    "170",
+		PricedAt:         pricedAt,
+	}
+	result := stateMarketPrice(quote, appstate.InstrumentDailyPriceSeries{}, "2", pricedAt.Add(time.Minute))
+	if result.Provider != prices.ProviderYahoo || !result.Archived || !result.PricedAt.Equal(pricedAt) || result.DayChange != nil {
+		t.Fatalf("unexpected imported market price: %#v", result)
 	}
 }

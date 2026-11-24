@@ -68,10 +68,13 @@ func YahooPricesSync(service yahooPricesSyncService, valuation liveValuationRefr
 		deltas := make([]realtime.InstrumentPriceDelta, 0, len(result.ChangedPrices))
 		for _, price := range result.ChangedPrices {
 			deltas = append(deltas, realtime.InstrumentPriceDelta{
-				InstrumentID: price.InstrumentID,
-				UnitValue:    price.UnitValue,
-				Currency:     price.Currency,
-				PricedAt:     price.PricedAt,
+				InstrumentID:  price.InstrumentID,
+				PositionValue: result.PositionValues[price.InstrumentID],
+				Provider:      price.Provider,
+				Symbol:        price.ProviderSymbol,
+				UnitValue:     price.UnitValue,
+				Currency:      price.Currency,
+				PricedAt:      price.PricedAt,
 			})
 		}
 

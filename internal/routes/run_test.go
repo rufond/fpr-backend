@@ -91,3 +91,66 @@ func TestNewHandlerPublicRouteReceivesKnownUser(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
 }
+
+func TestNewHandlerRejectsOversizedJSON(t *testing.T) {
+	t.Parallel()
+
+	handler := NewHandler([]Route{
+		{
+			Method: http.MethodPost,
+			Path:   "/data",
+			Handler: func(Request) (int, error, any) {
+				t.Fatal("handler was called with an oversized request")
+				return 0, nil, nil
+			},
+		},
+	}, nil, nil)
+
+	response := httptest.NewRecorder()
+	body := `{"value":"` + strings.Repeat("x", maxRequestBodyBytes) + `"}`
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/data", strings.NewReader(body)))
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestNewHandlerRawBodyRequiresAuthAndHonorsItsLimit(t *testing.T) {
+	t.Parallel()
+	const input = "{\"date\":1}\n{\"date\":2}\n"
+	handler := NewHandler([]Route{{
+		Method: http.MethodPost, Path: "/import", AuthRequired: true, MaxRawBodyBytes: int64(len(input)),
+		Handler: func(request Request) (int, error, any) {
+			if string(request.RawBody) != input || request.Body != nil {
+				t.Fatalf("expected the original NDJSON body, got %q", request.RawBody)
+			}
+			return http.StatusOK, nil, nil
+		},
+	}}, nil, func(token string) *User {
+		if token == "valid-token" {
+			return &User{Login: "admin"}
+		}
+		return nil
+	})
+
+	for _, test := range []struct {
+		name, token, body string
+		status            int
+	}{
+		{"anonymous", "", input, http.StatusUnauthorized},
+		{"authorized", "valid-token", input, http.StatusOK},
+		{"oversized", "valid-token", input + " ", http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/import", strings.NewReader(test.body))
+			if test.token != "" {
+				request.Header.Set("Authorization", "Bearer "+test.token)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d", response.Code, test.status)
+			}
+		})
+	}
+}

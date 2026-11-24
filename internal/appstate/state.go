@@ -71,6 +71,7 @@ type FundLiveValuation struct {
 	EstimatedCalculatedUnitValueRUB string
 	PremiumDiscountPercent          string
 	LiveDeltaUSD                    string
+	LiveDeltaPercent                string
 	LiveCoveragePercent             string
 }
 
@@ -126,8 +127,10 @@ type InstrumentPricePoint struct {
 }
 
 type InstrumentPrice struct {
-	PriceSourceID int64
-	InstrumentID  int64
+	PreviousClose    string
+	ImportedProvider string
+	PriceSourceID    int64
+	InstrumentID     int64
 
 	AssetType string
 	ISIN      string
@@ -144,8 +147,24 @@ type InstrumentPrice struct {
 }
 
 type FundState struct {
-	Snapshot    FundSnapshot
-	DailyValues []FundDailyValue
+	Snapshot           FundSnapshot
+	DailyValues        []FundDailyValue
+	CompositionHistory []FundComposition
+}
+
+type FundComposition struct {
+	AsOfDate time.Time
+	Holdings []FundHolding
+}
+
+type FundHolding struct {
+	ISIN                 string
+	Name                 string
+	Kind                 string
+	Quantity             string
+	AssetSharePercent    string
+	AssetShareUpperBound bool
+	Rows                 int
 }
 
 type FundSnapshot struct {
@@ -157,8 +176,22 @@ type FundSnapshot struct {
 	CalculatedUnitValueUSD string
 	NAVUSD                 string
 
+	UnitCount  *FundUnitCount
 	Assets     []FundAsset
 	Categories []FundCategory
+}
+
+type FundUnitCount struct {
+	AsOfDate         time.Time
+	UnitsOutstanding string
+	SourceURL        string
+}
+
+type BondDetails struct {
+	NominalValue      string
+	NominalCurrency   string
+	MaturityDate      time.Time
+	CouponRatePercent string
 }
 
 type FundAsset struct {
@@ -174,6 +207,7 @@ type FundAsset struct {
 	InstrumentName string
 	Issuer         string
 	Ticker         string
+	BondDetails    *BondDetails
 
 	Currency string
 	Quantity string

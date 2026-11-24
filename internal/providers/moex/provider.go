@@ -24,7 +24,7 @@ import (
 
 const (
 	defaultBaseURL         = "https://iss.moex.com"
-	requestTimeout         = 15 * time.Second
+	DefaultRequestTimeout  = 15 * time.Second
 	maxResponseSize        = 1 << 20
 	maxHistoryPages        = 100
 	historicalLookbackDays = 45
@@ -79,10 +79,11 @@ type board struct {
 }
 
 type marketQuote struct {
-	Value    string
-	Currency string
-	PricedAt time.Time
-	Source   string
+	PreviousClose string
+	Value         string
+	Currency      string
+	PricedAt      time.Time
+	Source        string
 }
 
 type issBlock struct {
@@ -112,7 +113,7 @@ func NewProvider(baseURL string, client *http.Client) *Provider {
 		baseURL = defaultBaseURL
 	}
 	if client == nil {
-		client = &http.Client{Timeout: requestTimeout}
+		client = &http.Client{Timeout: DefaultRequestTimeout}
 	}
 
 	return &Provider{
@@ -130,10 +131,11 @@ func (p *Provider) FetchFundUnitQuote(ctx context.Context) (prices.SourceQuote, 
 	}
 
 	return prices.SourceQuote{
-		UnitValue: quote.Value,
-		Currency:  quote.Currency,
-		PricedAt:  quote.PricedAt,
-		Source:    quote.Source,
+		UnitValue:     quote.Value,
+		PreviousClose: quote.PreviousClose,
+		Currency:      quote.Currency,
+		PricedAt:      quote.PricedAt,
+		Source:        quote.Source,
 	}, nil
 }
 
@@ -267,10 +269,11 @@ func (p *Provider) FetchSecurityPrices(ctx context.Context, symbols []string) (p
 		}
 
 		result.QuotesBySymbol[symbol] = prices.SourceQuote{
-			UnitValue: quote.Value,
-			Currency:  quote.Currency,
-			PricedAt:  quote.PricedAt,
-			Source:    quote.Source,
+			UnitValue:     quote.Value,
+			PreviousClose: quote.PreviousClose,
+			Currency:      quote.Currency,
+			PricedAt:      quote.PricedAt,
+			Source:        quote.Source,
 		}
 	}
 
@@ -663,11 +666,16 @@ func (p *Provider) fetchQuote(ctx context.Context, security marketSecurity, curr
 		return nil, fmt.Errorf("request quote for %s: %w", security.SecurityID, err)
 	}
 
+	previous, hasPrevious := previousQuote(payload.Securities, currentBoard.Currency)
 	if quote, ok := currentQuote(payload.MarketData, currentBoard.Currency); ok {
+		if hasPrevious && previous.PricedAt.In(moscowLocation).Format(time.DateOnly) < quote.PricedAt.In(moscowLocation).Format(time.DateOnly) {
+			quote.PreviousClose = previous.Value
+		}
+
 		return quote, nil
 	}
-	if quote, ok := previousQuote(payload.Securities, currentBoard.Currency); ok {
-		return quote, nil
+	if hasPrevious {
+		return previous, nil
 	}
 
 	return nil, fmt.Errorf("quote for %s does not contain a usable price", security.SecurityID)

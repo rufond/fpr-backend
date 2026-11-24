@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	ProviderKASE  = "kase"
-	ProviderMOEX  = "moex"
-	ProviderYahoo = "yahoo"
+	ProviderKASE   = "kase"
+	ProviderNasdaq = "nasdaq"
+	ProviderMOEX   = "moex"
+	ProviderYahoo  = "yahoo"
 
 	FundUnitAssetType = "fund_unit"
 	FundUnitISIN      = "RU000A101NK4"
@@ -32,10 +33,11 @@ type YahooSource interface {
 }
 
 type SourceQuote struct {
-	UnitValue string
-	Currency  string
-	PricedAt  time.Time
-	Source    string
+	PreviousClose string
+	UnitValue     string
+	Currency      string
+	PricedAt      time.Time
+	Source        string
 }
 
 type SourceDailyPrice struct {
@@ -89,9 +91,10 @@ func (r DailySyncResult) Changed() bool {
 }
 
 type YahooSourceQuote struct {
-	UnitValue string
-	Currency  string
-	PricedAt  time.Time
+	PreviousClose string
+	UnitValue     string
+	Currency      string
+	PricedAt      time.Time
 }
 
 type YahooQuoteIssue struct {
@@ -130,6 +133,7 @@ type YahooSourceDiscoveryResult struct {
 }
 
 type YahooSyncResult struct {
+	PositionValues   map[int64]string
 	ExpectedSources  int
 	RequestedSymbols int
 	ReturnedSymbols  int
@@ -180,6 +184,7 @@ type MOEXSourceDiscoveryResult struct {
 }
 
 type MOEXSecuritySyncResult struct {
+	PositionValues            map[int64]string
 	ExpectedSources           int
 	RequestedSymbols          int
 	ChangedPrices             []appstate.InstrumentPrice

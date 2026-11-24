@@ -41,6 +41,7 @@ func TestMOEXFundUnitSyncPublishesPriceDelta(t *testing.T) {
 		Source:  "last",
 		Price: appstate.InstrumentPrice{
 			InstrumentID: 7,
+			Provider:     prices.ProviderMOEX,
 			UnitValue:    "3210.5",
 			Currency:     "RUB",
 			PricedAt:     pricedAt,
@@ -68,7 +69,8 @@ func TestMOEXFundUnitSyncPublishesPriceDelta(t *testing.T) {
 	if len(update.Scopes) != 1 || update.Scopes[0] != realtime.ScopeInstrumentPrices {
 		t.Fatalf("scopes = %#v", update.Scopes)
 	}
-	if len(update.InstrumentPrices) != 1 || update.InstrumentPrices[0].InstrumentID != 7 || update.InstrumentPrices[0].UnitValue != "3210.5" {
+	if len(update.InstrumentPrices) != 1 || update.InstrumentPrices[0].InstrumentID != 7 || update.InstrumentPrices[0].UnitValue != "3210.5" ||
+		update.InstrumentPrices[0].Provider != prices.ProviderMOEX || !update.InstrumentPrices[0].FundUnit {
 		t.Fatalf("instrument prices = %#v", update.InstrumentPrices)
 	}
 

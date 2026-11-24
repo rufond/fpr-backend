@@ -16,18 +16,18 @@ var fundUnitHistoryStartDate = time.Date(2020, time.February, 5, 0, 0, 0, 0, tim
 type serviceRepository interface {
 	EnsureFundUnitMOEXSource(ctx context.Context) (int64, error)
 	LoadState(ctx context.Context) (*appstate.PriceState, error)
-	PriceSources(ctx context.Context, provider string) ([]priceSource, error)
+	listPriceSources(ctx context.Context, provider string) ([]priceSource, error)
 	MappedInstrumentIDs(ctx context.Context) (map[int64]struct{}, error)
-	CreatePriceSources(ctx context.Context, provider string, items []sourceMapping) (int, error)
-	AllPriceSources(ctx context.Context) ([]storedPriceSource, error)
-	SetPriceSource(ctx context.Context, instrumentID int64, provider string, providerSymbol string, enabled bool) (storedPriceSource, bool, *appstate.PriceState, error)
+	createPriceSources(ctx context.Context, provider string, items []sourceMapping) (int, error)
+	listAllPriceSources(ctx context.Context) ([]storedPriceSource, error)
+	setPriceSource(ctx context.Context, instrumentID int64, provider string, providerSymbol string, enabled bool) (storedPriceSource, bool, *appstate.PriceState, error)
 	ApplyFundUnitMOEXQuote(
 		ctx context.Context,
 		priceSourceID int64,
 		quote SourceQuote,
 		fetchedAt time.Time,
 	) (changed bool, stale bool, price appstate.InstrumentPrice, err error)
-	ApplyQuotes(ctx context.Context, provider string, items []quoteToApply, fetchedAt time.Time) (applyQuotesResult, error)
+	applyQuotes(ctx context.Context, provider string, items []quoteToApply, fetchedAt time.Time) (applyQuotesResult, error)
 	ApplyFundUnitMOEXDailyPrices(
 		ctx context.Context,
 		priceSourceID int64,
@@ -39,6 +39,7 @@ type Service struct {
 	repository           serviceRepository
 	source               Source
 	yahoo                YahooSource
+	nasdaqHistorical     func(context.Context, []string, time.Time) (HistoricalSourceResult, error)
 	state                *appstate.Manager
 	now                  func() time.Time
 	fundUnitMOEXSourceID int64
@@ -57,6 +58,10 @@ func NewService(repository serviceRepository, source Source, yahooSource YahooSo
 		state:      state,
 		now:        time.Now,
 	}
+}
+
+func (s *Service) SetNasdaqHistoricalSource(fetch func(context.Context, []string, time.Time) (HistoricalSourceResult, error)) {
+	s.nasdaqHistorical = fetch
 }
 
 func (s *Service) Start(ctx context.Context) error {
@@ -181,7 +186,7 @@ func (s *Service) DiscoverMOEXSources(ctx context.Context) (*MOEXSourceDiscovery
 		return result, nil
 	}
 
-	created, errCreate := s.repository.CreatePriceSources(ctx, ProviderMOEX, mappings)
+	created, errCreate := s.repository.createPriceSources(ctx, ProviderMOEX, mappings)
 	if errCreate != nil {
 		return nil, errCreate
 	}
@@ -239,7 +244,7 @@ func (s *Service) DiscoverYahooSources(ctx context.Context) (*YahooSourceDiscove
 		return result, nil
 	}
 
-	created, errCreate := s.repository.CreatePriceSources(ctx, ProviderYahoo, mappings)
+	created, errCreate := s.repository.createPriceSources(ctx, ProviderYahoo, mappings)
 	if errCreate != nil {
 		return nil, errCreate
 	}
@@ -249,9 +254,13 @@ func (s *Service) DiscoverYahooSources(ctx context.Context) (*YahooSourceDiscove
 }
 
 func (s *Service) SyncMOEXSecurityPrices(ctx context.Context) (*MOEXSecuritySyncResult, error) {
+	return s.SyncSecurityPrices(ctx, ProviderMOEX, s.source.FetchSecurityPrices)
+}
+
+func (s *Service) SyncSecurityPrices(ctx context.Context, provider string, fetch func(context.Context, []string) (MOEXSourceResult, error)) (*MOEXSecuritySyncResult, error) {
 	current := s.state.Load()
 
-	priceSources, errSources := s.repository.PriceSources(ctx, ProviderMOEX)
+	priceSources, errSources := s.repository.listPriceSources(ctx, provider)
 	if errSources != nil {
 		return nil, errSources
 	}
@@ -274,9 +283,9 @@ func (s *Service) SyncMOEXSecurityPrices(ctx context.Context) (*MOEXSecuritySync
 		return result, nil
 	}
 
-	fetchResult, errFetch := s.source.FetchSecurityPrices(ctx, symbols)
+	fetchResult, errFetch := fetch(ctx, symbols)
 	if errFetch != nil {
-		return nil, fmt.Errorf("fetch MOEX security prices: %w", errFetch)
+		return nil, fmt.Errorf("fetch %s security prices: %w", provider, errFetch)
 	}
 
 	result.RequestedSymbols = fetchResult.RequestedSymbols
@@ -316,12 +325,13 @@ func (s *Service) SyncMOEXSecurityPrices(ctx context.Context) (*MOEXSecuritySync
 			return currentState, nil
 		}
 
-		applied, errApply := s.repository.ApplyQuotes(ctx, ProviderMOEX, activeItems, fetchedAt)
+		applied, errApply := s.repository.applyQuotes(ctx, provider, activeItems, fetchedAt)
 		if errApply != nil {
 			return nil, errApply
 		}
 
 		result.ChangedPrices = applied.ChangedPrices
+		result.PositionValues = PositionValues(currentState.Fund, applied.ChangedPrices)
 		result.UnchangedSources = applied.Unchanged
 		result.StaleSources = applied.Stale
 
@@ -344,7 +354,7 @@ func (s *Service) SyncMOEXSecurityPrices(ctx context.Context) (*MOEXSecuritySync
 func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error) {
 	current := s.state.Load()
 
-	priceSources, errSources := s.repository.PriceSources(ctx, ProviderYahoo)
+	priceSources, errSources := s.repository.listPriceSources(ctx, ProviderYahoo)
 	if errSources != nil {
 		return nil, errSources
 	}
@@ -393,10 +403,11 @@ func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error)
 			PriceSourceID: source.PriceSourceID,
 			InstrumentID:  source.InstrumentID,
 			Quote: SourceQuote{
-				UnitValue: quote.UnitValue,
-				Currency:  quote.Currency,
-				PricedAt:  quote.PricedAt,
-				Source:    ProviderYahoo,
+				UnitValue:     quote.UnitValue,
+				PreviousClose: quote.PreviousClose,
+				Currency:      quote.Currency,
+				PricedAt:      quote.PricedAt,
+				Source:        ProviderYahoo,
 			},
 		})
 	}
@@ -420,12 +431,13 @@ func (s *Service) SyncYahooPrices(ctx context.Context) (*YahooSyncResult, error)
 			return currentState, nil
 		}
 
-		applied, errApply := s.repository.ApplyQuotes(ctx, ProviderYahoo, activeItems, fetchedAt)
+		applied, errApply := s.repository.applyQuotes(ctx, ProviderYahoo, activeItems, fetchedAt)
 		if errApply != nil {
 			return nil, errApply
 		}
 
 		result.ChangedPrices = applied.ChangedPrices
+		result.PositionValues = PositionValues(currentState.Fund, applied.ChangedPrices)
 		result.UnchangedSources = applied.Unchanged
 		result.StaleSources = applied.Stale
 
@@ -492,7 +504,7 @@ func (s *Service) SyncFundUnitMOEXHistory(ctx context.Context) (*DailySyncResult
 func (s *Service) AdminPriceSources(ctx context.Context) (*AdminPriceSourcesResult, error) {
 	current := s.state.Load()
 
-	stored, errSources := s.repository.AllPriceSources(ctx)
+	stored, errSources := s.repository.listAllPriceSources(ctx)
 	if errSources != nil {
 		return nil, errSources
 	}
@@ -552,7 +564,15 @@ func (s *Service) SetPriceSource(
 			return nil, ErrPriceSourceInstrumentNotFound
 		}
 
-		stored, changed, priceState, errSet := s.repository.SetPriceSource(ctx, instrumentID, provider, providerSymbol, enabled)
+		if enabled && (provider == ProviderKASE || provider == ProviderNasdaq) {
+			for _, asset := range current.Fund.Snapshot.Assets {
+				if asset.InstrumentID != nil && *asset.InstrumentID == instrumentID && asset.InstrumentType == "bond" {
+					return nil, ErrPriceProviderNotImplemented
+				}
+			}
+		}
+
+		stored, changed, priceState, errSet := s.repository.setPriceSource(ctx, instrumentID, provider, providerSymbol, enabled)
 		if errSet != nil {
 			return nil, errSet
 		}
@@ -614,6 +634,12 @@ func (s *Service) HistoricalPricesAt(ctx context.Context, sources []appstate.Ins
 			providerResult, errFetch = s.source.FetchSecurityDailyPrices(ctx, symbols, till)
 		case ProviderYahoo:
 			providerResult, errFetch = s.yahoo.FetchDailyPrices(ctx, symbols, till)
+		case ProviderNasdaq:
+			if s.nasdaqHistorical != nil {
+				providerResult, errFetch = s.nasdaqHistorical(ctx, symbols, till)
+				break
+			}
+			fallthrough
 		default:
 			for _, source := range providerSources {
 				result.MissingSourceIDs = append(result.MissingSourceIDs, source.PriceSourceID)
@@ -719,11 +745,14 @@ func priceStateWithCurrentUpdates(current *appstate.PriceState, prices []appstat
 	}
 	if current != nil {
 		next.Sources = maps.Clone(current.Sources)
-		next.DailyPrices = current.DailyPrices
+		next.DailyPrices = maps.Clone(current.DailyPrices)
 		next.Points = maps.Clone(current.Points)
 	}
 	if next.Sources == nil {
 		next.Sources = map[int64]appstate.InstrumentPrice{}
+	}
+	if next.DailyPrices == nil {
+		next.DailyPrices = map[int64]appstate.InstrumentDailyPriceSeries{}
 	}
 	if next.Points == nil {
 		next.Points = map[int64]appstate.InstrumentPricePointSeries{}
@@ -756,9 +785,40 @@ func priceStateWithCurrentUpdates(current *appstate.PriceState, prices []appstat
 		series.Items = retainedPricePoints(series.Items, observedAt.Add(-pricePointRetention))
 
 		next.Points[price.PriceSourceID] = series
+		if price.AssetType != FundUnitAssetType && price.ISIN != FundUnitISIN {
+			next.DailyPrices[price.PriceSourceID] = withDailyQuote(next.DailyPrices[price.PriceSourceID], price)
+		}
 	}
 
 	return next
+}
+
+func withDailyQuote(series appstate.InstrumentDailyPriceSeries, quote appstate.InstrumentPrice) appstate.InstrumentDailyPriceSeries {
+	sameDay := dateonly.UTC(quote.PricedAt.UTC())
+	day := appstate.InstrumentDailyPrice{PriceDate: sameDay, UnitValue: quote.UnitValue, Currency: quote.Currency}
+	if series.PriceSourceID == 0 {
+		series = appstate.InstrumentDailyPriceSeries{
+			PriceSourceID:  quote.PriceSourceID,
+			InstrumentID:   quote.InstrumentID,
+			AssetType:      quote.AssetType,
+			ISIN:           quote.ISIN,
+			Name:           quote.Name,
+			Provider:       quote.Provider,
+			ProviderSymbol: quote.ProviderSymbol,
+		}
+	}
+	index, found := slices.BinarySearchFunc(series.Items, sameDay, func(item appstate.InstrumentDailyPrice, target time.Time) int {
+		return item.PriceDate.Compare(target)
+	})
+
+	series.Items = slices.Clone(series.Items)
+	if found {
+		series.Items[index] = day
+	} else {
+		series.Items = slices.Insert(series.Items, index, day)
+	}
+
+	return series
 }
 
 func retainedPricePoints(items []appstate.InstrumentPricePoint, cutoff time.Time) []appstate.InstrumentPricePoint {

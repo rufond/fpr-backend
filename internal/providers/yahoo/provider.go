@@ -42,6 +42,7 @@ type Provider struct {
 }
 
 type quote struct {
+	PreviousClose     string
 	Symbol            string
 	Currency          string
 	Price             string
@@ -108,6 +109,8 @@ type sparkMeta struct {
 	Currency           string        `json:"currency"`
 	RegularMarketTime  int64         `json:"regularMarketTime"`
 	RegularMarketPrice decimalNumber `json:"regularMarketPrice"`
+	PreviousClose      decimalNumber `json:"previousClose"`
+	ChartPreviousClose decimalNumber `json:"chartPreviousClose"`
 }
 
 func NewProvider(proxy ProxyConfig) (*Provider, error) {
@@ -295,6 +298,10 @@ func (p *Provider) fetchBatch(ctx context.Context, symbols []string) ([]quote, i
 
 			quoteObject.Currency = strings.TrimSpace(meta.Currency)
 			quoteObject.Price = meta.RegularMarketPrice.Text
+			quoteObject.PreviousClose = meta.PreviousClose.Text
+			if quoteObject.PreviousClose == "" {
+				quoteObject.PreviousClose = meta.ChartPreviousClose.Text
+			}
 
 			if meta.RegularMarketTime > 0 {
 				quoteObject.RegularMarketTime = time.Unix(meta.RegularMarketTime, 0).UTC()

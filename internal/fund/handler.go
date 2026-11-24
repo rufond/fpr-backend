@@ -6,9 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rufond/fpr-backend/internal/routes"
 	govalidate "github.com/xloss/go-validate"
 	"github.com/xloss/go-validate/rules"
+
+	"github.com/rufond/fpr-backend/internal/routes"
+	"github.com/rufond/fpr-backend/internal/validationrules"
 )
 
 type Handler struct {
@@ -25,6 +27,7 @@ type HistoryRequest struct {
 
 type MarketHistoryRequest struct {
 	From string `json:"from"`
+	ISIN string `json:"isin"`
 }
 
 func (h *Handler) State(_ routes.Request) (int, error, any) {
@@ -71,6 +74,7 @@ func (h *Handler) History(request routes.Request) (int, error, any) {
 func (h *Handler) MarketHistory(request routes.Request) (int, error, any) {
 	r, validationErrors := govalidate.Run[MarketHistoryRequest](request.Body, map[string][]any{
 		"from": {rules.String{}},
+		"isin": {validationrules.ISIN{}},
 	})
 	if len(validationErrors) != 0 {
 		return http.StatusUnprocessableEntity, nil, map[string]any{"errors": validationErrors}
@@ -90,7 +94,7 @@ func (h *Handler) MarketHistory(request routes.Request) (int, error, any) {
 		from = new(fromTime)
 	}
 
-	result, err := h.service.MarketHistory(from)
+	result, err := h.service.InstrumentMarketHistory(r.ISIN, from)
 	if err != nil {
 		return stateError(err)
 	}

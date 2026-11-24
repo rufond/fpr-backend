@@ -1,5 +1,9 @@
 BEGIN;
 
+DROP TABLE fund_archived_composition;
+DROP TABLE fund_portfolio_references;
+DROP TABLE fund_portfolio_reports;
+DROP TABLE scheduler_job_runs;
 DROP TABLE bond_market_data;
 DROP TABLE fund_value_points;
 DROP TABLE fund_snapshot_price_baselines;

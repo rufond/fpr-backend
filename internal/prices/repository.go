@@ -26,10 +26,12 @@ type priceQueryer interface {
 }
 
 type storedCurrentPrice struct {
-	UnitValue string    `db:"unit_value"`
-	Currency  string    `db:"currency"`
-	PricedAt  time.Time `db:"priced_at"`
-	FetchedAt time.Time `db:"fetched_at"`
+	ImportedProvider *string   `db:"imported_provider"`
+	PreviousClose    *string   `db:"previous_close"`
+	UnitValue        string    `db:"unit_value"`
+	Currency         string    `db:"currency"`
+	PricedAt         time.Time `db:"priced_at"`
+	FetchedAt        time.Time `db:"fetched_at"`
 }
 
 type storedDailyPrice struct {
@@ -72,8 +74,10 @@ type storedPricePointState struct {
 }
 
 type storedPriceState struct {
-	PriceSourceID int64 `db:"price_source_id"`
-	InstrumentID  int64 `db:"instrument_id"`
+	ImportedProvider *string `db:"imported_provider"`
+	PreviousClose    *string `db:"previous_close"`
+	PriceSourceID    int64   `db:"price_source_id"`
+	InstrumentID     int64   `db:"instrument_id"`
 
 	AssetType string `db:"asset_type"`
 	ISIN      string `db:"isin"`
@@ -115,7 +119,7 @@ func (r *Repository) LoadState(ctx context.Context) (*appstate.PriceState, error
 	return loadPriceState(ctx, r.db)
 }
 
-func (r *Repository) PriceSources(ctx context.Context, provider string) ([]priceSource, error) {
+func (r *Repository) listPriceSources(ctx context.Context, provider string) ([]priceSource, error) {
 	sources := builder.NewTable("instrument_price_sources")
 
 	query := builder.NewSelect()
@@ -182,7 +186,7 @@ func (r *Repository) MappedInstrumentIDs(ctx context.Context) (map[int64]struct{
 	return result, nil
 }
 
-func (r *Repository) AllPriceSources(ctx context.Context) ([]storedPriceSource, error) {
+func (r *Repository) listAllPriceSources(ctx context.Context) ([]storedPriceSource, error) {
 	table := builder.NewTable("instrument_price_sources")
 
 	query := builder.NewSelect()
@@ -218,7 +222,7 @@ func (r *Repository) AllPriceSources(ctx context.Context) ([]storedPriceSource, 
 	return items, nil
 }
 
-func (r *Repository) SetPriceSource(
+func (r *Repository) setPriceSource(
 	ctx context.Context,
 	instrumentID int64,
 	provider string,
@@ -382,7 +386,7 @@ func (r *Repository) SetPriceSource(
 	return selected, true, priceState, nil
 }
 
-func (r *Repository) CreatePriceSources(ctx context.Context, provider string, items []sourceMapping) (int, error) {
+func (r *Repository) createPriceSources(ctx context.Context, provider string, items []sourceMapping) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
@@ -475,7 +479,7 @@ func (r *Repository) ApplyFundUnitMOEXQuote(
 	return changed, stale, price, nil
 }
 
-func (r *Repository) ApplyQuotes(ctx context.Context, provider string, items []quoteToApply, fetchedAt time.Time) (applyQuotesResult, error) {
+func (r *Repository) applyQuotes(ctx context.Context, provider string, items []quoteToApply, fetchedAt time.Time) (applyQuotesResult, error) {
 	result := applyQuotesResult{ChangedPrices: make([]appstate.InstrumentPrice, 0, len(items))}
 	if len(items) == 0 {
 		return result, nil
@@ -487,6 +491,7 @@ func (r *Repository) ApplyQuotes(ctx context.Context, provider string, items []q
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	dailyTable := builder.NewTable("instrument_daily_prices")
 	for _, item := range items {
 		changed, stale, errApply := applyCurrentPriceQuote(ctx, tx, item.PriceSourceID, item.Quote, fetchedAt)
 		if errApply != nil {
@@ -506,6 +511,30 @@ func (r *Repository) ApplyQuotes(ctx context.Context, provider string, items []q
 		price, errPrice := loadInstrumentPrice(ctx, tx, item.PriceSourceID)
 		if errPrice != nil {
 			return applyQuotesResult{}, fmt.Errorf("load %s price source %d after update: %w", provider, item.PriceSourceID, errPrice)
+		}
+
+		day := SourceDailyPrice{PriceDate: dateonly.UTC(price.PricedAt.UTC()), UnitValue: price.UnitValue, Currency: price.Currency}
+		insert := builder.NewInsert(dailyTable)
+		insert.Value("price_source_id", price.PriceSourceID)
+		insert.Value("price_date", day.PriceDate)
+		insert.Value("unit_value", day.UnitValue)
+		insert.Value("currency", day.Currency)
+		insert.OnConflictDoNothing("price_source_id", "price_date")
+
+		sql, binds, errBuild := insert.Get()
+		if errBuild != nil {
+			return applyQuotesResult{}, fmt.Errorf("build insert daily %s quote for source %d: %w", provider, price.PriceSourceID, errBuild)
+		}
+
+		tag, errExec := tx.Exec(ctx, sql, pgx.NamedArgs(binds))
+		if errExec != nil {
+			return applyQuotesResult{}, fmt.Errorf("insert daily %s quote for source %d: %w", provider, price.PriceSourceID, errExec)
+		}
+
+		if tag.RowsAffected() == 0 {
+			if errUpdate := updateDailyPrice(ctx, tx, price.PriceSourceID, day); errUpdate != nil {
+				return applyQuotesResult{}, fmt.Errorf("update daily %s quote for source %d: %w", provider, price.PriceSourceID, errUpdate)
+			}
 		}
 
 		result.ChangedPrices = append(result.ChangedPrices, price)
@@ -543,15 +572,28 @@ func (r *Repository) ApplyFundUnitMOEXDailyPrices(
 	inserted := 0
 	updated := 0
 
+	dailyTable := builder.NewTable("instrument_daily_prices")
 	for _, item := range items {
 		priceDate := dateonly.UTC(item.PriceDate)
 		key := priceDate.Format(time.DateOnly)
 		previous, exists := byDate[key]
 
 		if !exists {
-			if errInsert := insertDailyPrice(ctx, tx, priceSourceID, item); errInsert != nil {
-				return 0, 0, nil, errInsert
+			insert := builder.NewInsert(dailyTable)
+			insert.Value("price_source_id", priceSourceID)
+			insert.Value("price_date", priceDate)
+			insert.Value("unit_value", item.UnitValue)
+			insert.Value("currency", item.Currency)
+
+			sql, binds, errBuild := insert.Get()
+			if errBuild != nil {
+				return 0, 0, nil, fmt.Errorf("build insert instrument daily price: %w", errBuild)
 			}
+
+			if _, errExec := tx.Exec(ctx, sql, pgx.NamedArgs(binds)); errExec != nil {
+				return 0, 0, nil, fmt.Errorf("insert instrument daily price: %w", errExec)
+			}
+
 			inserted++
 			continue
 		}
@@ -706,16 +748,30 @@ func applyCurrentPriceQuote(ctx context.Context, tx pgx.Tx, priceSourceID int64,
 		return false, false, errStored
 	}
 
-	if stored != nil && quote.PricedAt.Before(stored.PricedAt) {
-		return false, true, nil
-	}
+	if stored != nil && stored.ImportedProvider == nil {
+		if quote.PricedAt.Before(stored.PricedAt) {
+			return false, true, nil
+		}
 
-	if stored != nil && decimal.Equal(stored.UnitValue, quote.UnitValue) && stored.Currency == quote.Currency && stored.PricedAt.Equal(quote.PricedAt) {
-		return false, false, nil
+		var previousClose string
+		if stored.PreviousClose != nil {
+			previousClose = *stored.PreviousClose
+			if quote.PreviousClose == "" && stored.Currency == quote.Currency && dateonly.Equal(stored.PricedAt, quote.PricedAt) {
+				quote.PreviousClose = previousClose
+			}
+		}
+
+		if decimal.Equal(stored.UnitValue, quote.UnitValue) && stored.Currency == quote.Currency && stored.PricedAt.Equal(quote.PricedAt) && previousClose == quote.PreviousClose {
+			return false, false, nil
+		}
 	}
 
 	if errPersist := persistCurrentPrice(ctx, tx, priceSourceID, quote, fetchedAt, stored != nil); errPersist != nil {
 		return false, false, errPersist
+	}
+
+	if stored != nil && stored.ImportedProvider == nil && decimal.Equal(stored.UnitValue, quote.UnitValue) && stored.Currency == quote.Currency && stored.PricedAt.Equal(quote.PricedAt) {
+		return true, false, nil
 	}
 
 	if errPoint := insertPricePoint(ctx, tx, priceSourceID, quote, fetchedAt); errPoint != nil {
@@ -738,6 +794,8 @@ func loadCurrentPrice(ctx context.Context, db priceQueryer, priceSourceID int64)
 		builder.ColumnName{Table: table, Name: "currency"},
 		builder.ColumnName{Table: table, Name: "priced_at"},
 		builder.ColumnName{Table: table, Name: "fetched_at"},
+		builder.ColumnName{Table: table, Name: "previous_close"},
+		builder.ColumnName{Table: table, Name: "imported_provider"},
 	)
 	query.Where(builder.WhereEq{Table: table, Column: "price_source_id", Value: priceSourceID})
 	query.Limit(1)
@@ -772,11 +830,15 @@ func persistCurrentPrice(
 	exists bool,
 ) error {
 	table := builder.NewTable("instrument_prices")
-
+	var previousClose *string
+	if quote.PreviousClose != "" {
+		previousClose = new(quote.PreviousClose)
+	}
 	if !exists {
 		query := builder.NewInsert(table)
 		query.Value("price_source_id", priceSourceID)
 		query.Value("unit_value", quote.UnitValue)
+		query.Value("previous_close", previousClose)
 		query.Value("currency", quote.Currency)
 		query.Value("priced_at", quote.PricedAt.UTC())
 		query.Value("fetched_at", fetchedAt.UTC())
@@ -793,6 +855,8 @@ func persistCurrentPrice(
 
 	query := builder.NewUpdate(table)
 	query.Set("unit_value", quote.UnitValue)
+	query.Set("previous_close", previousClose)
+	query.Set("imported_provider", nil)
 	query.Set("currency", quote.Currency)
 	query.Set("priced_at", quote.PricedAt.UTC())
 	query.Set("fetched_at", fetchedAt.UTC())
@@ -883,25 +947,6 @@ func loadDailyPrices(ctx context.Context, db priceQueryer, priceSourceID int64) 
 	return items, nil
 }
 
-func insertDailyPrice(ctx context.Context, tx pgx.Tx, priceSourceID int64, item SourceDailyPrice) error {
-	table := builder.NewTable("instrument_daily_prices")
-	query := builder.NewInsert(table)
-	query.Value("price_source_id", priceSourceID)
-	query.Value("price_date", dateonly.UTC(item.PriceDate))
-	query.Value("unit_value", item.UnitValue)
-	query.Value("currency", item.Currency)
-
-	sql, binds, errBuild := query.Get()
-	if errBuild != nil {
-		return fmt.Errorf("build insert instrument daily price: %w", errBuild)
-	}
-	if _, errExec := tx.Exec(ctx, sql, pgx.NamedArgs(binds)); errExec != nil {
-		return fmt.Errorf("insert instrument daily price: %w", errExec)
-	}
-
-	return nil
-}
-
 func updateDailyPrice(ctx context.Context, tx pgx.Tx, priceSourceID int64, item SourceDailyPrice) error {
 	table := builder.NewTable("instrument_daily_prices")
 	query := builder.NewUpdate(table)
@@ -911,6 +956,10 @@ func updateDailyPrice(ctx context.Context, tx pgx.Tx, priceSourceID int64, item 
 	query.Where(builder.WhereAnd{List: []builder.Where{
 		builder.WhereEq{Table: table, Column: "price_source_id", Value: priceSourceID},
 		builder.WhereEq{Table: table, Column: "price_date", Value: dateonly.UTC(item.PriceDate)},
+		builder.WhereOr{List: []builder.Where{
+			builder.WhereNotEq{Table: table, Column: "unit_value", Value: item.UnitValue},
+			builder.WhereNotEq{Table: table, Column: "currency", Value: item.Currency},
+		}},
 	}})
 
 	sql, binds, errBuild := query.Get()
@@ -965,6 +1014,8 @@ func loadCurrentPriceState(ctx context.Context, db priceQueryer, state *appstate
 		builder.ColumnName{Table: prices, Name: "currency"},
 		builder.ColumnName{Table: prices, Name: "priced_at"},
 		builder.ColumnName{Table: prices, Name: "fetched_at"},
+		builder.ColumnName{Table: prices, Name: "previous_close"},
+		builder.ColumnName{Table: prices, Name: "imported_provider"},
 	)
 	query.Where(builder.WhereEq{Table: sources, Column: "enabled", Value: true})
 	query.Order(builder.Order{Table: sources, Column: "instrument_id"})
@@ -1154,6 +1205,8 @@ func loadInstrumentPrice(ctx context.Context, db priceQueryer, priceSourceID int
 		builder.ColumnName{Table: prices, Name: "currency"},
 		builder.ColumnName{Table: prices, Name: "priced_at"},
 		builder.ColumnName{Table: prices, Name: "fetched_at"},
+		builder.ColumnName{Table: prices, Name: "previous_close"},
+		builder.ColumnName{Table: prices, Name: "imported_provider"},
 	)
 	query.Where(builder.WhereEq{Table: prices, Column: "price_source_id", Value: priceSourceID})
 	query.Limit(1)
@@ -1178,17 +1231,29 @@ func loadInstrumentPrice(ctx context.Context, db priceQueryer, priceSourceID int
 }
 
 func instrumentPrice(item storedPriceState) appstate.InstrumentPrice {
+	var previousClose string
+	if item.PreviousClose != nil {
+		previousClose = *item.PreviousClose
+	}
+
+	var importedProvider string
+	if item.ImportedProvider != nil {
+		importedProvider = *item.ImportedProvider
+	}
+
 	return appstate.InstrumentPrice{
-		PriceSourceID:  item.PriceSourceID,
-		InstrumentID:   item.InstrumentID,
-		AssetType:      item.AssetType,
-		ISIN:           item.ISIN,
-		Name:           item.Name,
-		Provider:       item.Provider,
-		ProviderSymbol: item.ProviderSymbol,
-		UnitValue:      item.UnitValue,
-		Currency:       item.Currency,
-		PricedAt:       item.PricedAt.UTC(),
-		FetchedAt:      item.FetchedAt.UTC(),
+		ImportedProvider: importedProvider,
+		PriceSourceID:    item.PriceSourceID,
+		PreviousClose:    previousClose,
+		InstrumentID:     item.InstrumentID,
+		AssetType:        item.AssetType,
+		ISIN:             item.ISIN,
+		Name:             item.Name,
+		Provider:         item.Provider,
+		ProviderSymbol:   item.ProviderSymbol,
+		UnitValue:        item.UnitValue,
+		Currency:         item.Currency,
+		PricedAt:         item.PricedAt.UTC(),
+		FetchedAt:        item.FetchedAt.UTC(),
 	}
 }

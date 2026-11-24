@@ -11,18 +11,23 @@ import (
 )
 
 const JobMOEXUSDRUBSync = "moex_usd_rub_sync"
+const JobNBKUSDKZTSync = "nbk_usd_kzt_sync"
 
 type moexUSDRUBSyncService interface {
 	SyncUSDRUB(ctx context.Context) (*fx.SyncResult, error)
 }
 
 func MOEXUSDRUBSync(service moexUSDRUBSyncService, valuation liveValuationRefresher, publisher realtime.Publisher) scheduler.JobFunc {
+	return FXRateSync("MOEX", service.SyncUSDRUB, valuation, publisher)
+}
+
+func FXRateSync(provider string, sync func(context.Context) (*fx.SyncResult, error), valuation liveValuationRefresher, publisher realtime.Publisher) scheduler.JobFunc {
 	if publisher == nil {
 		publisher = realtime.DiscardPublisher{}
 	}
 
 	return func(ctx context.Context, logger zerolog.Logger) (*scheduler.JobResult, error) {
-		result, err := service.SyncUSDRUB(ctx)
+		result, err := sync(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -36,7 +41,7 @@ func MOEXUSDRUBSync(service moexUSDRUBSyncService, valuation liveValuationRefres
 		}
 
 		if !result.Changed {
-			logger.Debug().Interface("summary", summary).Msg("MOEX USD/RUB sync noop")
+			logger.Debug().Interface("summary", summary).Str("provider", provider).Msg("FX rate sync noop")
 			return scheduler.JobNoop(summary), nil
 		}
 
@@ -56,12 +61,12 @@ func MOEXUSDRUBSync(service moexUSDRUBSyncService, valuation liveValuationRefres
 		summary["live_valuation_changed"] = liveValuationChanged
 		if errValuation != nil {
 			summary["live_valuation_error"] = errValuation.Error()
-			logger.Error().Err(errValuation).Msg("refresh live valuation after MOEX USD/RUB sync")
+			logger.Error().Err(errValuation).Str("provider", provider).Msg("Refresh live valuation after FX rate sync")
 		} else {
 			summary["live_valuation_error"] = ""
 		}
 
-		logger.Debug().Interface("summary", summary).Msg("MOEX USD/RUB sync completed")
+		logger.Debug().Interface("summary", summary).Str("provider", provider).Msg("FX rate sync completed")
 		return scheduler.JobCompleted(summary), nil
 	}
 }

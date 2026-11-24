@@ -29,7 +29,14 @@ type serviceRepository interface {
 	) (bool, *appstate.FundState, error)
 }
 
+// EntryPrice describes the independently sourced IPO or entry reference.
+type EntryPrice struct {
+	USD         string
+	Approximate bool
+}
+
 type Service struct {
+	entryPrice func(isin, name, asOf string) EntryPrice
 	repository serviceRepository
 	source     ManagementCompanySource
 	state      *appstate.Manager
@@ -63,6 +70,10 @@ func NewService(repository serviceRepository, source ManagementCompanySource, st
 		state:      state,
 		now:        time.Now,
 	}
+}
+
+func (s *Service) SetEntryPriceLookup(lookup func(isin, name, asOf string) EntryPrice) {
+	s.entryPrice = lookup
 }
 
 // EnsureInitialized loads durable fund state into RAM. The external source is

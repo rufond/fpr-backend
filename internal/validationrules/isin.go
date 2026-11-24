@@ -1,6 +1,10 @@
 package validationrules
 
-import govalidate "github.com/xloss/go-validate"
+import (
+	"slices"
+
+	govalidate "github.com/xloss/go-validate"
+)
 
 // ISIN validates a canonical ISO 6166 identifier, including its Luhn check digit.
 // Missing/nil values are accepted so the rule composes with rules.Required{} in
@@ -42,11 +46,11 @@ func (ISIN) Validate(_ string, value any, _ map[string]any) bool {
 
 	sum := 0
 	double := false
-	for index := len(digits) - 1; index >= 0; index-- {
-		d := digits[index]
+	for _, d := range slices.Backward(digits) {
 		if double {
 			d *= 2
 		}
+
 		sum += d/10 + d%10
 		double = !double
 	}

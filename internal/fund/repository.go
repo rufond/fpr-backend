@@ -64,6 +64,11 @@ type storedSnapshotAsset struct {
 	Issuer         *string `db:"issuer"`
 	Ticker         *string `db:"ticker"`
 
+	NominalValue      *string    `db:"nominal_value"`
+	NominalCurrency   *string    `db:"nominal_currency"`
+	MaturityDate      *time.Time `db:"maturity_date"`
+	CouponRatePercent *string    `db:"coupon_rate_percent"`
+
 	Currency *string `db:"currency"`
 	Quantity *string `db:"quantity"`
 
@@ -188,6 +193,16 @@ func loadFundState(ctx context.Context, db queryer) (*appstate.FundState, error)
 		return nil, errDailyValues
 	}
 
+	unitCount, errCount := LoadUnitCount(ctx, db, snapshot.AsOfDate)
+	if errCount != nil {
+		return nil, errCount
+	}
+
+	compositions, errComposition := loadCompositionHistory(ctx, db)
+	if errComposition != nil {
+		return nil, errComposition
+	}
+
 	state := &appstate.FundState{
 		Snapshot: appstate.FundSnapshot{
 			ID:                     snapshot.ID,
@@ -196,10 +211,12 @@ func loadFundState(ctx context.Context, db queryer) (*appstate.FundState, error)
 			SourceHash:             snapshot.SourceHash,
 			CalculatedUnitValueUSD: snapshot.CalculatedUnitValueUSD,
 			NAVUSD:                 snapshot.NAVUSD,
+			UnitCount:              unitCount,
 			Assets:                 assets,
 			Categories:             categories,
 		},
-		DailyValues: make([]appstate.FundDailyValue, 0, len(dailyValues)),
+		DailyValues:        make([]appstate.FundDailyValue, 0, len(dailyValues)),
+		CompositionHistory: compositions,
 	}
 
 	for _, item := range dailyValues {
@@ -291,10 +308,12 @@ func loadLatestSnapshot(ctx context.Context, db queryer) (*storedSnapshot, error
 func loadSnapshotAssets(ctx context.Context, db queryer, snapshotID int64) ([]appstate.FundAsset, error) {
 	assetsTable := builder.NewTable("fund_snapshot_assets")
 	instrumentsTable := builder.NewTable("instruments")
+	bondsTable := builder.NewTable("bond_details")
 
 	query := builder.NewSelect()
 	query.From(assetsTable)
 	query.LeftJoin(instrumentsTable, builder.OnEq{Table1: assetsTable, Column1: "instrument_id", Table2: instrumentsTable, Column2: "id"})
+	query.LeftJoin(bondsTable, builder.OnEq{Table1: assetsTable, Column1: "instrument_id", Table2: bondsTable, Column2: "instrument_id"})
 	query.Column(
 		builder.ColumnName{Table: assetsTable, Name: "id"},
 		builder.ColumnName{Table: assetsTable, Name: "row_no"},
@@ -306,6 +325,10 @@ func loadSnapshotAssets(ctx context.Context, db queryer, snapshotID int64) ([]ap
 		builder.ColumnName{Table: instrumentsTable, Name: "name", Alias: "instrument_name"},
 		builder.ColumnName{Table: instrumentsTable, Name: "issuer"},
 		builder.ColumnName{Table: instrumentsTable, Name: "ticker"},
+		builder.ColumnName{Table: bondsTable, Name: "nominal_value"},
+		builder.ColumnName{Table: bondsTable, Name: "nominal_currency"},
+		builder.ColumnName{Table: bondsTable, Name: "maturity_date"},
+		builder.ColumnName{Table: bondsTable, Name: "coupon_rate_percent"},
 		builder.ColumnName{Table: assetsTable, Name: "currency"},
 		builder.ColumnName{Table: assetsTable, Name: "quantity"},
 		builder.ColumnName{Table: assetsTable, Name: "asset_share_percent"},
@@ -332,6 +355,18 @@ func loadSnapshotAssets(ctx context.Context, db queryer, snapshotID int64) ([]ap
 
 	result := make([]appstate.FundAsset, 0, len(stored))
 	for _, item := range stored {
+		var bondDetails *appstate.BondDetails
+		if item.NominalValue != nil || item.NominalCurrency != nil || item.MaturityDate != nil || item.CouponRatePercent != nil {
+			bondDetails = &appstate.BondDetails{
+				NominalValue:      stringValue(item.NominalValue),
+				NominalCurrency:   stringValue(item.NominalCurrency),
+				CouponRatePercent: stringValue(item.CouponRatePercent),
+			}
+			if item.MaturityDate != nil {
+				bondDetails.MaturityDate = dateonly.UTC(*item.MaturityDate)
+			}
+		}
+
 		result = append(result, appstate.FundAsset{
 			ID:                   item.ID,
 			RowNo:                item.RowNo,
@@ -343,6 +378,7 @@ func loadSnapshotAssets(ctx context.Context, db queryer, snapshotID int64) ([]ap
 			InstrumentName:       stringValue(item.InstrumentName),
 			Issuer:               stringValue(item.Issuer),
 			Ticker:               stringValue(item.Ticker),
+			BondDetails:          bondDetails,
 			Currency:             stringValue(item.Currency),
 			Quantity:             stringValue(item.Quantity),
 			AssetSharePercent:    item.AssetSharePercent,

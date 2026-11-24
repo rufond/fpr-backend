@@ -13,14 +13,19 @@ const (
 	ScopeFXRates          = "fx_rates"
 	ScopeInstrumentPrices = "instrument_prices"
 	ScopeLiveValuation    = "live_valuation"
+	ScopePortfolio        = "portfolio"
 	ScopeScheduler        = "scheduler"
 )
 
 type InstrumentPriceDelta struct {
-	InstrumentID int64     `json:"instrument_id"`
-	UnitValue    string    `json:"unit_value"`
-	Currency     string    `json:"currency"`
-	PricedAt     time.Time `json:"priced_at"`
+	Symbol        string    `json:"symbol,omitempty"`
+	PositionValue string    `json:"position_value,omitempty"`
+	InstrumentID  int64     `json:"instrument_id"`
+	Provider      string    `json:"provider"`
+	FundUnit      bool      `json:"fund_unit,omitempty"`
+	UnitValue     string    `json:"unit_value"`
+	Currency      string    `json:"currency"`
+	PricedAt      time.Time `json:"priced_at"`
 }
 
 type FXRateDelta struct {
@@ -38,6 +43,7 @@ type LiveValuationDelta struct {
 	EstimatedCalculatedUnitValueRUB *string `json:"estimated_calculated_unit_value_rub"`
 	PremiumDiscountPercent          *string `json:"premium_discount_percent"`
 	LiveDeltaUSD                    string  `json:"live_delta_usd"`
+	LiveDeltaPercent                string  `json:"live_delta_percent,omitempty"`
 	LiveCoveragePercent             string  `json:"live_coverage_percent"`
 }
 
@@ -63,6 +69,7 @@ func LiveValuationUpdate(live appstate.FundLiveValuation) Update {
 		EstimatedNAVUSD:                 live.EstimatedNAVUSD,
 		EstimatedCalculatedUnitValueUSD: live.EstimatedCalculatedUnitValueUSD,
 		LiveDeltaUSD:                    live.LiveDeltaUSD,
+		LiveDeltaPercent:                live.LiveDeltaPercent,
 		LiveCoveragePercent:             live.LiveCoveragePercent,
 	}
 

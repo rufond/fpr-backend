@@ -153,7 +153,7 @@ func (r *fakePriceRepository) LoadState(context.Context) (*appstate.PriceState, 
 	return r.loadState, r.loadErr
 }
 
-func (r *fakePriceRepository) PriceSources(context.Context, string) ([]priceSource, error) {
+func (r *fakePriceRepository) listPriceSources(context.Context, string) ([]priceSource, error) {
 	return r.priceSources, r.priceSourceErr
 }
 
@@ -161,7 +161,7 @@ func (r *fakePriceRepository) MappedInstrumentIDs(context.Context) (map[int64]st
 	return r.mappedIDs, r.mappedErr
 }
 
-func (r *fakePriceRepository) CreatePriceSources(_ context.Context, _ string, items []sourceMapping) (int, error) {
+func (r *fakePriceRepository) createPriceSources(_ context.Context, _ string, items []sourceMapping) (int, error) {
 	r.createdMappings = slices.Clone(items)
 
 	return r.createCount, r.createErr
@@ -176,7 +176,7 @@ func (r *fakePriceRepository) ApplyFundUnitMOEXQuote(
 	return r.applyChanged, r.applyStale, r.applyPrice, r.applyErr
 }
 
-func (r *fakePriceRepository) ApplyQuotes(
+func (r *fakePriceRepository) applyQuotes(
 	_ context.Context,
 	_ string,
 	items []quoteToApply,
@@ -187,11 +187,11 @@ func (r *fakePriceRepository) ApplyQuotes(
 	return r.applyResult, r.quotesApplyErr
 }
 
-func (r *fakePriceRepository) AllPriceSources(context.Context) ([]storedPriceSource, error) {
+func (r *fakePriceRepository) listAllPriceSources(context.Context) ([]storedPriceSource, error) {
 	return r.allSources, r.allErr
 }
 
-func (r *fakePriceRepository) SetPriceSource(
+func (r *fakePriceRepository) setPriceSource(
 	_ context.Context,
 	instrumentID int64,
 	provider string,

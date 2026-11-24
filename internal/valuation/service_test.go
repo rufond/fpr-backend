@@ -148,6 +148,9 @@ func TestStartBuildsBaselineFromHistoricalCloseAtOfficialDate(t *testing.T) {
 	if live.EstimatedNAVUSD != "1021" || live.EstimatedCalculatedUnitValueUSD != "10.21" || live.LiveDeltaUSD != "21" || live.LiveCoveragePercent != "30" {
 		t.Fatalf("live = %#v", live)
 	}
+	if live.LiveDeltaPercent != "2.1" {
+		t.Fatalf("unexpected change relative to official NAV: %s", live.LiveDeltaPercent)
+	}
 	if live.EstimatedCalculatedUnitValueRUB != "816.8" || live.PremiumDiscountPercent != "-2.056807051909892262" {
 		t.Fatalf("market comparison = %#v", live)
 	}

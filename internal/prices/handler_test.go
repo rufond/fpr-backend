@@ -72,10 +72,17 @@ func TestHandlerSetSourceNormalizesInputAndPublishesInvalidation(t *testing.T) {
 	}
 }
 
-func TestHandlerSetSourceRejectsEnabledProviderWithoutImplementation(t *testing.T) {
+func TestHandlerSetSourceRejectsEquityOnlyProviderForBond(t *testing.T) {
 	t.Parallel()
 
-	handler := NewHandler(NewService(&fakePriceRepository{}, nil, nil, appstate.NewManager()), nil)
+	manager := appstate.NewManager()
+	instrumentID := int64(51)
+	if err := manager.Initialize(&appstate.State{Fund: &appstate.FundState{Snapshot: appstate.FundSnapshot{
+		Assets: []appstate.FundAsset{{InstrumentID: &instrumentID, InstrumentType: "bond"}},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(NewService(&fakePriceRepository{}, nil, nil, manager), nil)
 	status, err, _ := handler.SetSource(routes.Request{
 		Context: context.Background(),
 		Body: map[string]any{
@@ -93,7 +100,7 @@ func TestHandlerSetSourceRejectsEnabledProviderWithoutImplementation(t *testing.
 	}
 }
 
-func TestHandlerSetSourceAllowsDisabledProviderWithoutImplementation(t *testing.T) {
+func TestHandlerSetSourceAllowsDisabledKASESource(t *testing.T) {
 	t.Parallel()
 
 	instrumentID := int64(51)

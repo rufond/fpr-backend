@@ -54,10 +54,12 @@ func (p *Provider) FetchPrices(ctx context.Context, symbols []string) (prices.Ya
 			continue
 		}
 
+		previousClose, _ := normalizePositiveDecimal(quoteObject.PreviousClose)
 		result.QuotesByRequest[requested] = prices.YahooSourceQuote{
-			UnitValue: normalized.UnitValue,
-			Currency:  normalized.Currency,
-			PricedAt:  normalized.PricedAt,
+			PreviousClose: previousClose,
+			UnitValue:     normalized.UnitValue,
+			Currency:      normalized.Currency,
+			PricedAt:      normalized.PricedAt,
 		}
 	}
 

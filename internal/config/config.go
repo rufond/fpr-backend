@@ -18,6 +18,7 @@ type Config struct {
 	DB                DBConfig
 	Admin             AdminConfig
 	ManagementCompany ManagementCompanyConfig
+	MOEXCAFile        string
 	Yahoo             YahooConfig
 }
 
@@ -102,6 +103,7 @@ func Load() (*Config, error) {
 		Admin:             admin,
 		ManagementCompany: ManagementCompanyConfig{FundURL: managementCompanyFundURL},
 		Yahoo:             yahoo,
+		MOEXCAFile:        strings.TrimSpace(os.Getenv("MOEX_CA_FILE")),
 	}, nil
 }
 

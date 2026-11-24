@@ -46,6 +46,9 @@ func MOEXFundUnitSync(service moexFundUnitSyncService, valuation liveValuationRe
 			InstrumentPrices: []realtime.InstrumentPriceDelta{
 				{
 					InstrumentID: result.Price.InstrumentID,
+					Provider:     result.Price.Provider,
+					Symbol:       result.Price.ProviderSymbol,
+					FundUnit:     true,
 					UnitValue:    result.Price.UnitValue,
 					Currency:     result.Price.Currency,
 					PricedAt:     result.Price.PricedAt,

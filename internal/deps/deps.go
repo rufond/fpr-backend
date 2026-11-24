@@ -2,7 +2,11 @@ package deps
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -28,6 +32,10 @@ type Deps struct {
 
 func New(ctx context.Context, cfg *config.Config) (*Deps, error) {
 	logger := newLogger(cfg)
+	moexClient, err := newMOEXClient(cfg.MOEXCAFile)
+	if err != nil {
+		return nil, err
+	}
 
 	db, err := newDB(ctx, cfg)
 	if err != nil {
@@ -49,7 +57,7 @@ func New(ctx context.Context, cfg *config.Config) (*Deps, error) {
 		DB:                db,
 		Logger:            logger,
 		ManagementCompany: managementcompany.NewProvider(cfg.ManagementCompany.FundURL, nil),
-		MOEX:              moex.NewProvider("", nil),
+		MOEX:              moex.NewProvider("", moexClient),
 		Yahoo:             yahooProvider,
 	}, nil
 }
@@ -98,4 +106,67 @@ func newDB(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
 	}
 
 	return pool, nil
+}
+
+func newMOEXClient(path string) (*http.Client, error) {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if path == "" {
+		// VerifyConnection checks the ISS peer and permits only an unknown issuer.
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyConnection = verifyMOEXConnection
+	} else {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read MOEX CA bundle: %w", err)
+		}
+
+		roots, err := x509.SystemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf("load system CA pool for MOEX: %w", err)
+		}
+
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("MOEX_CA_FILE contains no valid PEM certificates")
+		}
+		tlsConfig.RootCAs = roots
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	return &http.Client{
+		Timeout:   moex.DefaultRequestTimeout,
+		Transport: transport,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= 10 || request.URL.Hostname() != via[0].URL.Hostname() || request.URL.Scheme != "https" {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}, nil
+}
+
+func verifyMOEXConnection(state tls.ConnectionState) error {
+	if state.ServerName != "iss.moex.com" || len(state.PeerCertificates) == 0 {
+		return fmt.Errorf("expected a TLS certificate for iss.moex.com")
+	}
+
+	options := x509.VerifyOptions{
+		DNSName:       state.ServerName,
+		Intermediates: x509.NewCertPool(),
+	}
+	for _, certificate := range state.PeerCertificates[1:] {
+		options.Intermediates.AddCert(certificate)
+	}
+	certificate := state.PeerCertificates[0]
+	_, err := certificate.Verify(options)
+	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); !ok {
+		return err
+	}
+
+	// Trust the presented leaf for this verification only. The usual name,
+	// validity and server-auth checks still apply, but its issuer is unverified.
+	options.Roots = x509.NewCertPool()
+	options.Roots.AddCert(certificate)
+	_, err = certificate.Verify(options)
+	return err
 }
